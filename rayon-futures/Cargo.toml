@@ -10,7 +10,8 @@ documentation = "https://docs.rs/rayon-futures/"
 readme = "README.md"
 keywords = ["parallel", "thread", "concurrency", "join", "performance"]
 categories = ["concurrency"]
+publish = false
 
 [dependencies]
-rayon-core = { version = "1.3", path = "../rayon-core" }
+rustc-rayon-core = { version = "0.1", path = "../rayon-core" }
 futures = "0.1.16"
