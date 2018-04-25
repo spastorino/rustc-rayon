@@ -5,7 +5,7 @@ authors = ["Niko Matsakis <niko@alum.mit.edu>"]
 publish = false
 
 [dependencies]
-rayon = { path = "../" }
+rustc-rayon = { path = "../" }
 cgmath = "0.16"
 docopt = "1"
 fixedbitset = "0.1.5"
