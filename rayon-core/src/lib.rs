@@ -58,6 +58,7 @@ mod spawn;
 mod thread_pool;
 mod unwind;
 mod util;
+mod worker_local;
 
 mod compile_fail;
 mod test;
@@ -74,6 +75,7 @@ pub use spawn::{spawn, spawn_fifo};
 pub use thread_pool::current_thread_has_pending_tasks;
 pub use thread_pool::current_thread_index;
 pub use thread_pool::ThreadPool;
+pub use worker_local::WorkerLocal;
 
 use registry::{CustomSpawn, DefaultSpawn, ThreadSpawn};
 
