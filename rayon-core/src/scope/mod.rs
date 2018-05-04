@@ -16,6 +16,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 use unwind;
+use tlv;
 
 mod internal;
 #[cfg(test)]
@@ -45,6 +46,9 @@ pub struct Scope<'scope> {
     /// `Sync`, but it's still safe to let the `Scope` implement `Sync` because
     /// the closures are only *moved* across threads to be executed.
     marker: PhantomData<Box<FnOnce(&Scope<'scope>) + Send + Sync + 'scope>>,
+
+    /// The TLV at the scope's creation. Used to set the TLV for spawned jobs.
+    tlv: usize,
 }
 
 /// Create a "fork-join" scope `s` and invokes the closure with a
@@ -269,9 +273,12 @@ where
                 panic: AtomicPtr::new(ptr::null_mut()),
                 job_completed_latch: CountLatch::new(),
                 marker: PhantomData,
+                tlv: tlv::get(),
             };
             let result = scope.execute_job_closure(op);
             scope.steal_till_jobs_complete(owner_thread);
+            // Restore the TLV if we ran some jobs while waiting
+            tlv::set(scope.tlv);
             result.unwrap() // only None if `op` panicked, and that would have been propagated
         }
     })
@@ -336,7 +343,10 @@ impl<'scope> Scope<'scope> {
     {
         unsafe {
             self.job_completed_latch.increment();
-            let job_ref = Box::new(HeapJob::new(move || self.execute_job(body))).as_job_ref();
+            let job_ref = Box::new(HeapJob::new(
+                self.tlv,
+                move || self.execute_job(body),
+            )).as_job_ref();
 
             // Since `Scope` implements `Sync`, we can't be sure
             // that we're still in a thread of this pool, so we
@@ -418,6 +428,8 @@ impl<'scope> Scope<'scope> {
             log!(ScopeCompletePanicked {
                 owner_thread: owner_thread.index()
             });
+            // Restore the TLV if we ran some jobs while waiting
+            tlv::set(self.tlv);
             let value: Box<Box<Any + Send + 'static>> = mem::transmute(panic);
             unwind::resume_unwinding(*value);
         } else {

@@ -68,7 +68,7 @@ where
     // executed. This ref is decremented at the (*) below.
     registry.increment_terminate_count();
 
-    let async_job = Box::new(HeapJob::new({
+    let async_job = Box::new(HeapJob::new(0, {
         let registry = registry.clone();
         move || {
             match unwind::halt_unwinding(func) {
