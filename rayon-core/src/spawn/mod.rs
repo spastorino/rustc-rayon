@@ -92,7 +92,7 @@ where
     // executed. This ref is decremented at the (*) below.
     registry.increment_terminate_count();
 
-    Box::new(HeapJob::new({
+    Box::new(HeapJob::new(0, {
         let registry = registry.clone();
         move || {
             match unwind::halt_unwinding(func) {
