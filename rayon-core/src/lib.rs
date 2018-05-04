@@ -57,6 +57,9 @@ mod util;
 mod compile_fail;
 mod test;
 
+#[cfg(feature = "tlv")]
+pub mod tlv;
+
 #[cfg(rayon_unstable)]
 pub mod internal;
 pub use join::{join, join_context};

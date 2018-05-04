@@ -3,6 +3,8 @@ use std::any::Any;
 use std::cell::UnsafeCell;
 use std::mem;
 use unwind;
+#[cfg(feature = "tlv")]
+use tlv;
 
 pub enum JobResult<T> {
     None,
@@ -75,6 +77,8 @@ where
     pub latch: L,
     func: UnsafeCell<Option<F>>,
     result: UnsafeCell<JobResult<R>>,
+    #[cfg(feature = "tlv")]
+    tlv: usize,
 }
 
 impl<L, F, R> StackJob<L, F, R>
@@ -88,6 +92,8 @@ where
             latch: latch,
             func: UnsafeCell::new(Some(func)),
             result: UnsafeCell::new(JobResult::None),
+            #[cfg(feature = "tlv")]
+            tlv: tlv::get(),
         }
     }
 
@@ -112,6 +118,8 @@ where
 {
     unsafe fn execute(this: *const Self) {
         let this = &*this;
+        #[cfg(feature = "tlv")]
+        tlv::set(this.tlv);
         let abort = unwind::AbortIfPanic;
         let func = (*this.func.get()).take().unwrap();
         (*this.result.get()) = match unwind::halt_unwinding(|| func(true)) {
@@ -134,6 +142,8 @@ where
     BODY: FnOnce() + Send,
 {
     job: UnsafeCell<Option<BODY>>,
+    #[cfg(feature = "tlv")]
+    tlv: usize,
 }
 
 impl<BODY> HeapJob<BODY>
@@ -143,6 +153,8 @@ where
     pub fn new(func: BODY) -> Self {
         HeapJob {
             job: UnsafeCell::new(Some(func)),
+            #[cfg(feature = "tlv")]
+            tlv: tlv::get(),
         }
     }
 
@@ -161,6 +173,8 @@ where
 {
     unsafe fn execute(this: *const Self) {
         let this: Box<Self> = mem::transmute(this);
+        #[cfg(feature = "tlv")]
+        tlv::set(this.tlv);
         let job = (*this.job.get()).take().unwrap();
         job();
     }
