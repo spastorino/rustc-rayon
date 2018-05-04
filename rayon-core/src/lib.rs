@@ -50,6 +50,7 @@ mod registry;
 mod scope;
 mod sleep;
 mod spawn;
+mod worker_local;
 mod thread_pool;
 mod unwind;
 mod util;
@@ -64,6 +65,8 @@ pub mod internal;
 pub use join::{join, join_context};
 pub use scope::{scope, Scope};
 pub use spawn::spawn;
+pub use worker_local::WorkerLocal;
+
 pub use thread_pool::current_thread_has_pending_tasks;
 pub use thread_pool::current_thread_index;
 pub use thread_pool::ThreadPool;
