@@ -18,7 +18,8 @@ use std::thread;
 use std::usize;
 use unwind;
 use util::leak;
-use {ErrorKind, ExitHandler, PanicHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder};
+use {ErrorKind, ExitHandler, PanicHandler, StartHandler,
+     MainHandler, ThreadPoolBuildError, ThreadPoolBuilder};
 
 pub struct Registry {
     thread_infos: Vec<ThreadInfo>,
@@ -28,6 +29,7 @@ pub struct Registry {
     panic_handler: Option<Box<PanicHandler>>,
     start_handler: Option<Box<StartHandler>>,
     exit_handler: Option<Box<ExitHandler>>,
+    main_handler: Option<Box<MainHandler>>,
 
     // When this latch reaches 0, it means that all work on this
     // registry must be complete. This is ensured in the following ways:
@@ -117,6 +119,7 @@ impl Registry {
             terminate_latch: CountLatch::new(),
             panic_handler: builder.take_panic_handler(),
             start_handler: builder.take_start_handler(),
+            main_handler: builder.take_main_handler(),
             exit_handler: builder.take_exit_handler(),
         });
 
@@ -689,7 +692,21 @@ unsafe fn main_loop(
         }
     }
 
-    worker_thread.wait_until(&registry.terminate_latch);
+    let mut work = || {
+        worker_thread.wait_until(&registry.terminate_latch);
+    };
+
+    if let Some(ref handler) = registry.main_handler {
+        match unwind::halt_unwinding(|| handler(index, &mut work)) {
+            Ok(()) => {
+            }
+            Err(err) => {
+                registry.handle_panic(err);
+            }
+        }
+    } else {
+        work();
+    }
 
     // Should not be any work left in our queue.
     debug_assert!(worker_thread.take_local_job().is_none());
