@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::usize;
+use DeadlockHandler;
 
 mod counters;
 use self::counters::{AtomicCounters, Counters, INVALID_SLEEPY_COUNTER, SleepyCounter, ZERO_SLEEPY_COUNTER};
@@ -96,6 +97,7 @@ impl Sleep {
         &self,
         idle_state: &mut IdleState,
         latch: &CoreLatch,
+        deadlock_handler: &Option<Box<DeadlockHandler>>,
     ) {
         if idle_state.rounds < ROUNDS_UNTIL_SLEEPY {
             thread::yield_now();
@@ -109,7 +111,7 @@ impl Sleep {
             thread::yield_now();
         } else {
             debug_assert_eq!(idle_state.rounds, ROUNDS_UNTIL_SLEEPING);
-            self.sleep(idle_state, latch);
+            self.sleep(idle_state, latch, deadlock_handler);
         }
     }
 
@@ -133,7 +135,7 @@ impl Sleep {
     }
 
     #[cold]
-    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch) {
+    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch, _deadlock_handler: &Option<Box<DeadlockHandler>>) {
         let worker_index = idle_state.worker_index;
 
         if !latch.get_sleepy() {
@@ -267,6 +269,10 @@ impl Sleep {
     ) {
         self.new_jobs(source_worker_index, num_jobs, queue_was_empty)
     }
+
+    pub fn mark_blocked(&self, _deadlock_handler: &Option<Box<DeadlockHandler>>) {}
+
+    pub fn mark_unblocked(&self) {}
 
     /// Common helper for `new_injected_jobs` and `new_internal_jobs`.
     #[inline]
