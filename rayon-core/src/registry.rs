@@ -18,8 +18,8 @@ use std::thread;
 use std::usize;
 use unwind;
 use util::leak;
-use {ErrorKind, ExitHandler, PanicHandler, DeadlockHandler, StartHandler,
-     MainHandler, ThreadPoolBuildError, ThreadPoolBuilder};
+use {ErrorKind, ExitHandler, PanicHandler, DeadlockHandler, StartHandler, AcquireThreadHandler, 
+     MainHandler, ThreadPoolBuildError, ThreadPoolBuilder, ReleaseThreadHandler};
 
 pub struct Registry {
     thread_infos: Vec<ThreadInfo>,
@@ -27,10 +27,12 @@ pub struct Registry {
     sleep: Sleep,
     job_uninjector: Stealer<JobRef>,
     panic_handler: Option<Box<PanicHandler>>,
-    deadlock_handler: Option<Box<DeadlockHandler>>,
+    pub(crate) deadlock_handler: Option<Box<DeadlockHandler>>,
     start_handler: Option<Box<StartHandler>>,
     exit_handler: Option<Box<ExitHandler>>,
     main_handler: Option<Box<MainHandler>>,
+    pub(crate) acquire_thread_handler: Option<Box<AcquireThreadHandler>>,
+    pub(crate) release_thread_handler: Option<Box<ReleaseThreadHandler>>,
 
     // When this latch reaches 0, it means that all work on this
     // registry must be complete. This is ensured in the following ways:
@@ -123,6 +125,8 @@ impl Registry {
             start_handler: builder.take_start_handler(),
             main_handler: builder.take_main_handler(),
             exit_handler: builder.take_exit_handler(),
+            acquire_thread_handler: builder.take_acquire_thread_handler(),
+            release_thread_handler: builder.take_release_thread_handler(),
         });
 
         // If we return early or panic, make sure to terminate existing threads.
@@ -222,8 +226,22 @@ impl Registry {
     /// Waits for the worker threads to stop. This is used for testing
     /// -- so we can check that termination actually works.
     pub(crate) fn wait_until_stopped(&self) {
+        self.release_thread();
         for info in &self.thread_infos {
             info.stopped.wait();
+        }
+        self.acquire_thread();
+    }
+
+    pub(crate) fn acquire_thread(&self) {
+        if let Some(ref acquire_thread_handler) = self.acquire_thread_handler {
+            acquire_thread_handler();
+        }
+    }
+
+    pub(crate) fn release_thread(&self) {
+        if let Some(ref release_thread_handler) = self.release_thread_handler {
+            release_thread_handler();
         }
     }
 
@@ -375,7 +393,9 @@ impl Registry {
             op(&*worker_thread, true)
         }, LockLatch::new());
         self.inject(&[job.as_job_ref()]);
+        self.release_thread();
         job.latch.wait();
+        self.acquire_thread();
         job.into_result()
     }
 
@@ -614,7 +634,7 @@ impl WorkerThread {
                 yields = self.registry.sleep.no_work_found(
                     self.index,
                     yields,
-                    &self.registry.deadlock_handler
+                    &self.registry
                 );
             }
         }
@@ -716,6 +736,8 @@ unsafe fn main_loop(
         worker_thread.wait_until(&registry.terminate_latch);
     };
 
+    registry.acquire_thread();
+
     if let Some(ref handler) = registry.main_handler {
         match unwind::halt_unwinding(|| handler(index, &mut work)) {
             Ok(()) => {
@@ -748,6 +770,8 @@ unsafe fn main_loop(
         }
         // We're already exiting the thread, there's nothing else to do.
     }
+
+    registry.release_thread();
 }
 
 /// If already in a worker-thread, just execute `op`.  Otherwise,

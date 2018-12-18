@@ -152,6 +152,12 @@ pub struct ThreadPoolBuilder {
     /// Closure invoked on worker thread start.
     main_handler: Option<Box<MainHandler>>,
 
+    /// Closure invoked when starting computations in a thread.
+    acquire_thread_handler: Option<Box<AcquireThreadHandler>>,
+
+    /// Closure invoked when blocking in a thread.
+    release_thread_handler: Option<Box<ReleaseThreadHandler>>,
+
     /// If false, worker threads will execute spawned jobs in a
     /// "depth-first" fashion. If true, they will do a "breadth-first"
     /// fashion. Depth-first is the default.
@@ -189,6 +195,14 @@ type ExitHandler = Fn(usize) + Send + Sync;
 /// The closure is passed the index of the thread on which it is invoked.
 /// Note that this same closure may be invoked multiple times in parallel.
 type MainHandler = Fn(usize, &mut FnMut()) + Send + Sync;
+
+/// The type for a closure that gets invoked before starting computations in a thread.
+/// Note that this same closure may be invoked multiple times in parallel.
+type AcquireThreadHandler = Fn() + Send + Sync;
+
+/// The type for a closure that gets invoked before blocking in a thread.
+/// Note that this same closure may be invoked multiple times in parallel.
+type ReleaseThreadHandler = Fn() + Send + Sync;
 
 impl ThreadPoolBuilder {
     /// Creates and returns a valid rayon thread pool builder, but does not initialize it.
@@ -361,6 +375,32 @@ impl ThreadPoolBuilder {
 
     fn get_breadth_first(&self) -> bool {
         self.breadth_first
+    }
+
+    /// Takes the current acquire thread callback, leaving `None`.
+    fn take_acquire_thread_handler(&mut self) -> Option<Box<AcquireThreadHandler>> {
+        self.acquire_thread_handler.take()
+    }
+
+    /// Set a callback to be invoked when starting computations in a thread.
+    pub fn acquire_thread_handler<H>(mut self, acquire_thread_handler: H) -> ThreadPoolBuilder
+        where H: Fn() + Send + Sync + 'static
+    {
+        self.acquire_thread_handler = Some(Box::new(acquire_thread_handler));
+        self
+    }
+
+    /// Takes the current release thread callback, leaving `None`.
+    fn take_release_thread_handler(&mut self) -> Option<Box<ReleaseThreadHandler>> {
+        self.release_thread_handler.take()
+    }
+
+    /// Set a callback to be invoked when blocking in thread.
+    pub fn release_thread_handler<H>(mut self, release_thread_handler: H) -> ThreadPoolBuilder
+        where H: Fn() + Send + Sync + 'static
+    {
+        self.release_thread_handler = Some(Box::new(release_thread_handler));
+        self
     }
 
     /// Takes the current deadlock callback, leaving `None`.
@@ -546,10 +586,12 @@ impl fmt::Debug for ThreadPoolBuilder {
             ref get_thread_name,
             ref panic_handler,
             ref stack_size,
-            ref deadlock_handler, 
+            ref deadlock_handler,
             ref start_handler,
             ref main_handler,
             ref exit_handler,
+            ref acquire_thread_handler,
+            ref release_thread_handler,
             ref breadth_first,
         } = *self;
 
@@ -567,6 +609,8 @@ impl fmt::Debug for ThreadPoolBuilder {
         let start_handler = start_handler.as_ref().map(|_| ClosurePlaceholder);
         let exit_handler = exit_handler.as_ref().map(|_| ClosurePlaceholder);
         let main_handler = main_handler.as_ref().map(|_| ClosurePlaceholder);
+        let acquire_thread_handler = acquire_thread_handler.as_ref().map(|_| ClosurePlaceholder);
+        let release_thread_handler = release_thread_handler.as_ref().map(|_| ClosurePlaceholder);
 
         f.debug_struct("ThreadPoolBuilder")
             .field("num_threads", num_threads)
@@ -577,6 +621,8 @@ impl fmt::Debug for ThreadPoolBuilder {
             .field("start_handler", &start_handler)
             .field("exit_handler", &exit_handler)
             .field("main_handler", &main_handler)
+            .field("acquire_thread_handler", &acquire_thread_handler)
+            .field("release_thread_handler", &release_thread_handler)
             .field("breadth_first", &breadth_first)
             .finish()
     }
