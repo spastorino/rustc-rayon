@@ -5,6 +5,7 @@ use crossbeam_utils::CachePadded;
 use latch::CoreLatch;
 use log::Logger;
 use log::Event::*;
+use registry::Registry;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 use std::thread;
@@ -97,7 +98,7 @@ impl Sleep {
         &self,
         idle_state: &mut IdleState,
         latch: &CoreLatch,
-        deadlock_handler: &Option<Box<DeadlockHandler>>,
+        registry: &Registry,
     ) {
         if idle_state.rounds < ROUNDS_UNTIL_SLEEPY {
             thread::yield_now();
@@ -111,7 +112,7 @@ impl Sleep {
             thread::yield_now();
         } else {
             debug_assert_eq!(idle_state.rounds, ROUNDS_UNTIL_SLEEPING);
-            self.sleep(idle_state, latch, deadlock_handler);
+            self.sleep(idle_state, latch, registry);
         }
     }
 
@@ -135,7 +136,7 @@ impl Sleep {
     }
 
     #[cold]
-    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch, _deadlock_handler: &Option<Box<DeadlockHandler>>) {
+    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch, registry: &Registry) {
         let worker_index = idle_state.worker_index;
 
         if !latch.get_sleepy() {
@@ -198,6 +199,8 @@ impl Sleep {
         // counter". This means that whomever is coming to wake us
         // will have to wait until we release the mutex in the call to
         // `wait`, so they will see this boolean as true.)
+        registry.release_thread();
+
         *is_blocked = true;
         while *is_blocked {
             is_blocked = sleep_state.condvar.wait(is_blocked).unwrap();
@@ -212,6 +215,8 @@ impl Sleep {
             latch_addr: latch.addr(),
         });
 
+        drop(is_blocked);
+        registry.acquire_thread();
     }
 
     /// Notify the given thread that it should wake up (if it is
