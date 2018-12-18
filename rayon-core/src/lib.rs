@@ -156,6 +156,12 @@ pub struct ThreadPoolBuilder<S = DefaultSpawn> {
     /// Closure invoked to spawn threads.
     spawn_handler: S,
 
+    /// Closure invoked when starting computations in a thread.
+    acquire_thread_handler: Option<Box<AcquireThreadHandler>>,
+
+    /// Closure invoked when blocking in a thread.
+    release_thread_handler: Option<Box<ReleaseThreadHandler>>,
+
     /// If false, worker threads will execute spawned jobs in a
     /// "depth-first" fashion. If true, they will do a "breadth-first"
     /// fashion. Depth-first is the default.
@@ -194,11 +200,21 @@ impl Default for ThreadPoolBuilder {
             stack_size: None,
             start_handler: None,
             exit_handler: None,
+            acquire_thread_handler: None,
+            release_thread_handler: None,
             spawn_handler: DefaultSpawn,
             breadth_first: false,
         }
     }
 }
+
+/// The type for a closure that gets invoked before starting computations in a thread.
+/// Note that this same closure may be invoked multiple times in parallel.
+type AcquireThreadHandler = dyn Fn() + Send + Sync;
+
+/// The type for a closure that gets invoked before blocking in a thread.
+/// Note that this same closure may be invoked multiple times in parallel.
+type ReleaseThreadHandler = dyn Fn() + Send + Sync;
 
 impl ThreadPoolBuilder {
     /// Creates and returns a valid rayon thread pool builder, but does not initialize it.
@@ -302,7 +318,12 @@ impl ThreadPoolBuilder {
                     Ok(())
                 })
                 .build()?;
-            Ok(with_pool(&pool))
+            let result = unwind::halt_unwinding(|| with_pool(&pool));
+            pool.wait_until_stopped();
+            match result {
+                Ok(result) => Ok(result),
+                Err(err) => unwind::resume_unwinding(err),
+            }
         });
 
         match result {
@@ -380,6 +401,8 @@ impl<S> ThreadPoolBuilder<S> {
             stack_size: self.stack_size,
             start_handler: self.start_handler,
             exit_handler: self.exit_handler,
+            acquire_thread_handler: self.acquire_thread_handler,
+            release_thread_handler: self.release_thread_handler,
             breadth_first: self.breadth_first,
         }
     }
@@ -538,6 +561,34 @@ impl<S> ThreadPoolBuilder<S> {
         self.breadth_first
     }
 
+    /// Takes the current acquire thread callback, leaving `None`.
+    fn take_acquire_thread_handler(&mut self) -> Option<Box<AcquireThreadHandler>> {
+        self.acquire_thread_handler.take()
+    }
+
+    /// Set a callback to be invoked when starting computations in a thread.
+    pub fn acquire_thread_handler<H>(mut self, acquire_thread_handler: H) -> Self
+    where
+        H: Fn() + Send + Sync + 'static,
+    {
+        self.acquire_thread_handler = Some(Box::new(acquire_thread_handler));
+        self
+    }
+
+    /// Takes the current release thread callback, leaving `None`.
+    fn take_release_thread_handler(&mut self) -> Option<Box<ReleaseThreadHandler>> {
+        self.release_thread_handler.take()
+    }
+
+    /// Set a callback to be invoked when blocking in thread.
+    pub fn release_thread_handler<H>(mut self, release_thread_handler: H) -> Self
+    where
+        H: Fn() + Send + Sync + 'static,
+    {
+        self.release_thread_handler = Some(Box::new(release_thread_handler));
+        self
+    }
+
     /// Takes the current thread start callback, leaving `None`.
     fn take_start_handler(&mut self) -> Option<Box<StartHandler>> {
         self.start_handler.take()
@@ -693,6 +744,8 @@ impl<S> fmt::Debug for ThreadPoolBuilder<S> {
             ref stack_size,
             ref start_handler,
             ref exit_handler,
+            ref acquire_thread_handler,
+            ref release_thread_handler,
             spawn_handler: _,
             ref breadth_first,
         } = *self;
@@ -709,6 +762,8 @@ impl<S> fmt::Debug for ThreadPoolBuilder<S> {
         let panic_handler = panic_handler.as_ref().map(|_| ClosurePlaceholder);
         let start_handler = start_handler.as_ref().map(|_| ClosurePlaceholder);
         let exit_handler = exit_handler.as_ref().map(|_| ClosurePlaceholder);
+        let acquire_thread_handler = acquire_thread_handler.as_ref().map(|_| ClosurePlaceholder);
+        let release_thread_handler = release_thread_handler.as_ref().map(|_| ClosurePlaceholder);
 
         f.debug_struct("ThreadPoolBuilder")
             .field("num_threads", num_threads)
@@ -717,6 +772,8 @@ impl<S> fmt::Debug for ThreadPoolBuilder<S> {
             .field("stack_size", &stack_size)
             .field("start_handler", &start_handler)
             .field("exit_handler", &exit_handler)
+            .field("acquire_thread_handler", &acquire_thread_handler)
+            .field("release_thread_handler", &release_thread_handler)
             .field("breadth_first", &breadth_first)
             .finish()
     }

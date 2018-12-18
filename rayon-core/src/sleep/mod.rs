@@ -5,6 +5,7 @@ use crossbeam_utils::CachePadded;
 use latch::CoreLatch;
 use log::Logger;
 use log::Event::*;
+use registry::Registry;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex};
 use std::thread;
@@ -96,6 +97,7 @@ impl Sleep {
         &self,
         idle_state: &mut IdleState,
         latch: &CoreLatch,
+        registry: &Registry,
     ) {
         if idle_state.rounds < ROUNDS_UNTIL_SLEEPY {
             thread::yield_now();
@@ -109,7 +111,7 @@ impl Sleep {
             thread::yield_now();
         } else {
             debug_assert_eq!(idle_state.rounds, ROUNDS_UNTIL_SLEEPING);
-            self.sleep(idle_state, latch);
+            self.sleep(idle_state, latch, registry);
         }
     }
 
@@ -133,7 +135,7 @@ impl Sleep {
     }
 
     #[cold]
-    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch) {
+    fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch, registry: &Registry) {
         let worker_index = idle_state.worker_index;
 
         if !latch.get_sleepy() {
@@ -189,6 +191,8 @@ impl Sleep {
             latch_addr: latch.addr(),
         });
 
+        registry.release_thread();
+
         // Flag ourselves as asleep and wait till we are notified.
         //
         // (Note that `is_blocked` is held under a mutex and the mutex
@@ -210,6 +214,7 @@ impl Sleep {
             latch_addr: latch.addr(),
         });
 
+        registry.acquire_thread();
     }
 
     /// Notify the given thread that it should wake up (if it is
