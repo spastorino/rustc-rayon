@@ -274,6 +274,12 @@ impl ThreadPool {
         // We assert that `self.registry` has not terminated.
         unsafe { spawn::spawn_fifo_in(op, &self.registry) }
     }
+
+    pub(crate) fn wait_until_stopped(self) {
+        let registry = self.registry.clone();
+        drop(self);
+        registry.wait_until_stopped();
+    }
 }
 
 impl Drop for ThreadPool {
