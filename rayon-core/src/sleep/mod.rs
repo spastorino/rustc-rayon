@@ -1,6 +1,7 @@
 //! Code that decides when workers should go to sleep. See README.md
 //! for an overview.
 
+use crossbeam_utils::CachePadded;
 use log::Event::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -11,9 +12,18 @@ pub(super) struct Sleep {
     /// Stores simultaneously whether any workers are *sleeping* and the thread-id
     /// of the sleepy worker:
     ///
-    /// - The least significant bit stores if any workers are *sleeping*
+    /// - The least significant bit stores if there **may** be workers *sleeping*
     /// - The remaining bits, if 0, indicate that there is no current sleepy worker
     /// - Otherwise, the remaining bits store N + 1 where N is the thread-id of the sleepy worker
+    ///
+    /// It is important to note that the SLEEPING bit is an
+    /// approximation. In some race conditions, it is possible for a
+    /// thread to set the bit, go to sleep, and then get awoken
+    /// without the bit having been cleared. This is harmless: it can
+    /// cause us to do a bit of extra work to acquire locks and
+    /// things, but shouldn't lead to any further problems.  (The
+    /// **definitive** value as to whether a thread is asleep is
+    /// stored in the sleep state for the worker.)
     ///
     /// Example:
     ///
@@ -24,12 +34,16 @@ pub(super) struct Sleep {
     ///     - Determine by shifting right to `0b10` and then subtracting 1 to yield `0b1`
     state: AtomicUsize,
 
-    /// A mutex used just to guard the condvars
-    data: Mutex<()>,
+    /// One "sleep state" per worker. Used to track if a worker is sleeping and to have
+    /// them block.
+    worker_sleep_states: Vec<CachePadded<WorkerSleepState>>,
+}
 
-    /// One condvar per worker thread -- each worker sleeps on this
-    /// condvar when it goes to sleep.
-    sleep_condvars: Vec<Condvar>,
+/// The "sleep state" for an individual worker.
+#[derive(Default)]
+struct WorkerSleepState {
+    is_asleep: Mutex<bool>,
+    condvar: Condvar,
 }
 
 /// The `state` value that indicates (a) no workers are sleeping and
@@ -47,8 +61,7 @@ impl Sleep {
     pub(super) fn new(n_threads: usize) -> Sleep {
         Sleep {
             state: AtomicUsize::new(AWAKE),
-            data: Mutex::new(()),
-            sleep_condvars: (0..n_threads).map(|_| Condvar::new()).collect(),
+            worker_sleep_states: (0..n_threads).map(|_| Default::default()).collect(),
         }
     }
 
@@ -209,10 +222,28 @@ impl Sleep {
             target_worker: target_worker_index,
             old_state: old_state,
         });
+
+        // Now that we have changed the state, we also want to awaken
+        // any threads that are asleep. Note that this a lot could
+        // happen between us doing the AWAKE and actually waking
+        // threads -- e.g., other thread *could* even go to sleep in
+        // the meantime.
+        //
+        // This is actually *mildly* odd, in that the state could be
+        // out of date -- it may indicate some thread is sleeping when
+        // in fact they are not. This is because the thread would've been
+        // notified by us, but we are not modifying the state variable.
+        //
+        // But this doesn't do really do any harm -- such a thread
+        // would loop around and, if there's no work, eventually get
+        // sleepy again. But it's good to remember that the sleepy bit
+        // is not reliable.
         if self.anyone_sleeping(old_state) {
-            let _data = self.data.lock().unwrap();
-            for bed in &self.sleep_condvars {
-                bed.notify_one();
+            for sleep_state in &self.worker_sleep_states {
+                let is_asleep = sleep_state.is_asleep.lock().unwrap();
+                if *is_asleep {
+                    sleep_state.condvar.notify_one();
+                }
             }
         }
     }
@@ -307,7 +338,7 @@ impl Sleep {
                 //
                 // # Scenario 1
                 //
-                // - A loads state and see SLEEPY(A)
+                // - A loads state and sees SLEEPY(A)
                 // - B swaps to AWAKE.
                 // - A locks, fails CAS
                 //
@@ -325,7 +356,9 @@ impl Sleep {
                 // reason for the `compare_exchange` to fail is if an
                 // awaken comes, in which case the next cycle around
                 // the loop will just return.
-                let data = self.data.lock().unwrap();
+                let sleep_state = &self.worker_sleep_states[worker_index];
+                let mut is_asleep = sleep_state.is_asleep.lock().unwrap();
+                debug_assert!(!*is_asleep);
 
                 // This must be SeqCst on success because we want to
                 // ensure:
@@ -354,7 +387,9 @@ impl Sleep {
                     log!(FellAsleep {
                         worker: worker_index
                     });
-                    let _ = self.sleep_condvars[worker_index].wait(data).unwrap();
+                    *is_asleep = true;
+                    is_asleep = sleep_state.condvar.wait(is_asleep).unwrap();
+                    *is_asleep = false;
                     log!(GotAwoken {
                         worker: worker_index
                     });
