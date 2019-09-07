@@ -237,7 +237,7 @@ impl Registry {
 
         let registry = Arc::new(Registry {
             thread_infos: stealers.into_iter().map(ThreadInfo::new).collect(),
-            sleep: Sleep::new(),
+            sleep: Sleep::new(n_threads),
             injected_jobs: SegQueue::new(),
             terminate_latch: CountLatch::new(),
             panic_handler: builder.take_panic_handler(),

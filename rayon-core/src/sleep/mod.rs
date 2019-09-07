@@ -24,11 +24,12 @@ pub(super) struct Sleep {
     ///     - Determine by shifting right to `0b10` and then subtracting 1 to yield `0b1`
     state: AtomicUsize,
 
-    /// A mutex used just to guard the condvar
+    /// A mutex used just to guard the condvars
     data: Mutex<()>,
 
-    /// Condvar that sleeping threads can block on
-    tickle: Condvar,
+    /// One condvar per worker thread -- each worker sleeps on this
+    /// condvar when it goes to sleep.
+    sleep_condvars: Vec<Condvar>,
 }
 
 /// The `state` value that indicates (a) no workers are sleeping and
@@ -43,11 +44,11 @@ const ROUNDS_UNTIL_SLEEPY: usize = 32;
 const ROUNDS_UNTIL_ASLEEP: usize = 64;
 
 impl Sleep {
-    pub(super) fn new() -> Sleep {
+    pub(super) fn new(n_threads: usize) -> Sleep {
         Sleep {
             state: AtomicUsize::new(AWAKE),
             data: Mutex::new(()),
-            tickle: Condvar::new(),
+            sleep_condvars: (0..n_threads).map(|_| Condvar::new()).collect(),
         }
     }
 
@@ -210,7 +211,9 @@ impl Sleep {
         });
         if self.anyone_sleeping(old_state) {
             let _data = self.data.lock().unwrap();
-            self.tickle.notify_all();
+            for bed in &self.sleep_condvars {
+                bed.notify_one();
+            }
         }
     }
 
@@ -351,7 +354,7 @@ impl Sleep {
                     log!(FellAsleep {
                         worker: worker_index
                     });
-                    let _ = self.tickle.wait(data).unwrap();
+                    let _ = self.sleep_condvars[worker_index].wait(data).unwrap();
                     log!(GotAwoken {
                         worker: worker_index
                     });
