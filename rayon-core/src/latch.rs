@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
-
-use registry::Registry;
+use registry::{Registry, WorkerThread};
 
 /// We define various kinds of latches, which are all a primitive signaling
 /// mechanism. A latch starts as false. Eventually someone calls `set()` and
@@ -44,15 +43,19 @@ pub(super) trait LatchProbe {
 /// that becomes true when `set()` is called.
 pub(super) struct SpinLatch<'r> {
     b: AtomicBool,
-    r: &'r Registry,
+    registry: &'r Registry,
 }
 
 impl<'r> SpinLatch<'r> {
+    /// Creates a new spin latch that is owned by `thread`. This means
+    /// that `thread` is the only thread that should be blocking on
+    /// this latch -- it also means that when the latch is set, we
+    /// will wake `thread` if it is sleeping.
     #[inline]
-    pub(super) fn new(r: &'r Registry) -> SpinLatch {
+    pub(super) fn new(thread: &'r WorkerThread) -> SpinLatch {
         SpinLatch {
             b: AtomicBool::new(false),
-            r,
+            registry: thread.registry(),
         }
     }
 }
@@ -68,7 +71,7 @@ impl<'r> Latch for SpinLatch<'r> {
     #[inline]
     fn set(&self) {
         self.b.store(true, Ordering::SeqCst);
-        self.r.tickle_from_latch();
+        self.registry.tickle_from_latch();
     }
 }
 
