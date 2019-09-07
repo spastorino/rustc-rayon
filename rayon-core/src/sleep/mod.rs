@@ -73,6 +73,12 @@ impl Sleep {
         ((worker_index + 1) << 1) + state
     }
 
+    /// Return a new state value in which there is no sleepy worker,
+    /// but the presence or absence of sleeping workers is preserved.
+    fn clear_sleepy_worker(&self, state: usize) -> usize {
+        state & 1
+    }
+
     #[inline]
     pub(super) fn work_found(&self, worker_index: usize, yields: usize) -> usize {
         log!(FoundWork {
@@ -80,10 +86,7 @@ impl Sleep {
             yields: yields,
         });
         if yields > ROUNDS_UNTIL_SLEEPY {
-            // FIXME tickling here is a bit extreme; mostly we want to "release the lock"
-            // from us being sleepy, we don't necessarily need to wake others
-            // who are sleeping
-            self.tickle(worker_index);
+            self.caffeinate(worker_index);
         }
         0
     }
@@ -118,6 +121,34 @@ impl Sleep {
             debug_assert_eq!(yields, ROUNDS_UNTIL_ASLEEP);
             self.sleep(worker_index);
             0
+        }
+    }
+
+    /// If `worker_index` is sleepy, this will return them to the
+    /// fully awake state.  Precondition: `worker_index` must not be
+    /// asleep. This is invoked when a worker finds work.
+    fn caffeinate(&self, worker_index: usize) {
+        loop {
+            // (*) Any ordering should suffice on this load: if we get
+            // some outdated value, the `compare_exchange` below must
+            // fail and we'll loop around again.
+            let old_state = self.state.load(Ordering::Relaxed);
+            if self.worker_is_sleepy(old_state, worker_index) {
+                // At this point, we are the sleepy worker. We want to
+                // set the state to have no sleepy worker -- but we
+                // need to preserve the fact that someone may be
+                // SLEEPING.
+                let new_state = self.clear_sleepy_worker(old_state);
+                if self
+                    .state
+                    .compare_exchange(old_state, new_state, Ordering::SeqCst, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return;
+                }
+            } else {
+                return;
+            }
         }
     }
 
