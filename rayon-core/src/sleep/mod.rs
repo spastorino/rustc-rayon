@@ -8,12 +8,35 @@ use std::thread;
 use std::usize;
 
 pub(super) struct Sleep {
+    /// Stores simultaneously whether any workers are *sleeping* and the thread-id
+    /// of the sleepy worker:
+    ///
+    /// - The least significant bit stores if any workers are *sleeping*
+    /// - The remaining bits, if 0, indicate that there is no current sleepy worker
+    /// - Otherwise, the remaining bits store N + 1 where N is the thread-id of the sleepy worker
+    ///
+    /// Example:
+    ///
+    /// A state value of 5, or `0b101` in binary, would mean:
+    ///
+    /// - There are sleepy workers (LSB is 1)
+    /// - The worker with id 1 is sleepy (about to fall asleep)
+    ///     - Determine by shifting right to `0b10` and then subtracting 1 to yield `0b1`
     state: AtomicUsize,
+
+    /// A mutex used just to guard the condvar
     data: Mutex<()>,
+
+    /// Condvar that sleeping threads can block on
     tickle: Condvar,
 }
 
+/// The `state` value that indicates (a) no workers are sleeping and
+/// (b) there is no sleepy worker presently.
 const AWAKE: usize = 0;
+
+/// The `state` value that indicates (a) there are workers sleeping
+/// and (b) there is no sleepy worker presently.
 const SLEEPING: usize = 1;
 
 const ROUNDS_UNTIL_SLEEPY: usize = 32;
@@ -28,18 +51,23 @@ impl Sleep {
         }
     }
 
+    /// Test `state` to see if any workers have fallen asleep.
     fn anyone_sleeping(&self, state: usize) -> bool {
         state & SLEEPING != 0
     }
 
+    /// Test `state` to see if we have a current sleepy worker.
     fn any_worker_is_sleepy(&self, state: usize) -> bool {
         (state >> 1) != 0
     }
 
+    /// Test `state` to see if `worker_index` is the sleepy worker.
     fn worker_is_sleepy(&self, state: usize, worker_index: usize) -> bool {
         (state >> 1) == (worker_index + 1)
     }
 
+    /// Return a new state value in which `worker_index` is the sleepy worker.
+    /// There must not have been a sleepy worker before.
     fn with_sleepy_worker(&self, state: usize, worker_index: usize) -> usize {
         debug_assert!(state == AWAKE || state == SLEEPING);
         ((worker_index + 1) << 1) + state
