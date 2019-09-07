@@ -139,9 +139,11 @@ impl Sleep {
     }
 
     /// If `worker_index` is sleepy, this will return them to the
-    /// fully awake state.  Precondition: `worker_index` must not be
-    /// asleep. This is invoked when a worker finds work.
-    fn caffeinate(&self, worker_index: usize) {
+    /// fully awake state. Has no effect if the worker is not sleepy
+    /// -- this includes if the worker is fully asleep!
+    ///
+    /// Returns true if the worker *was* sleepy but now is not.
+    fn caffeinate(&self, worker_index: usize) -> bool {
         loop {
             // (*) Any ordering should suffice on this load: if we get
             // some outdated value, the `compare_exchange` below must
@@ -158,10 +160,10 @@ impl Sleep {
                     .compare_exchange(old_state, new_state, Ordering::SeqCst, Ordering::Relaxed)
                     .is_ok()
                 {
-                    return;
+                    return true;
                 }
             } else {
-                return;
+                return false;
             }
         }
     }
@@ -177,11 +179,50 @@ impl Sleep {
     /// `std::usize::MAX` if the event is not targeting any specific
     /// thread. This is used (e.g.) when a latch is set, to awaken
     /// just the thread that was blocking on the latch.
-    ///
-    /// FIXME -- `target_worker_index` is currently unused but will be
-    /// used by the end of this PR series.
-    pub(super) fn tickle_one(&self, source_worker_index: usize, _target_worker_index: usize) {
-        self.tickle_all(source_worker_index);
+    pub(super) fn tickle_one(&self, source_worker_index: usize, target_worker_index: usize) {
+        let old_state = self.state.load(Ordering::SeqCst);
+        if old_state != AWAKE {
+            self.tickle_one_cold(old_state, source_worker_index, target_worker_index);
+        }
+    }
+
+    #[cold]
+    fn tickle_one_cold(
+        &self,
+        old_state: usize,
+        source_worker_index: usize,
+        target_worker_index: usize,
+    ) {
+        log!(TickleOne {
+            source_worker: source_worker_index,
+            target_worker: target_worker_index,
+            old_state: old_state,
+        });
+
+        // It's possible that `target_worker_index` is sleepy, in
+        // which case we may be able to caffeinate them before they
+        // fall asleep. In that case, we're all done here.
+        if self.worker_is_sleepy(old_state, target_worker_index) {
+            if self.caffeinate(target_worker_index) {
+                return;
+            }
+        }
+
+        // Otherwise, we need to acquire the worker's lock and check
+        // whether they are sleeping. Note that we cannot rely on the
+        // result of `self.anyone_sleeping(old_state)` here -- this is
+        // because it is possible that our worker has come and gone to
+        // sleep since we did that load. Without acquiring the lock,
+        // we simply cannot make the check atomic.
+        let sleep_state = &self.worker_sleep_states[target_worker_index];
+        let is_asleep = sleep_state.is_asleep.lock().unwrap();
+        if *is_asleep {
+            sleep_state.condvar.notify_one();
+        }
+
+        // Note that we also cannot clear the SLEEPING bit from the
+        // state here, as other works may be asleep. It's ok, that bit
+        // is an over-approximation.
     }
 
     /// See `tickle_one` -- this method is used to tickle any single
@@ -200,12 +241,12 @@ impl Sleep {
         //   precede the call to `tickle()`, even though we did not do a write.
         let old_state = self.state.load(Ordering::SeqCst);
         if old_state != AWAKE {
-            self.tickle_cold(source_worker_index, std::usize::MAX);
+            self.tickle_all_cold(source_worker_index);
         }
     }
 
     #[cold]
-    fn tickle_cold(&self, source_worker_index: usize, target_worker_index: usize) {
+    fn tickle_all_cold(&self, source_worker_index: usize) {
         // The `Release` ordering here suffices. The reasoning is that
         // the atomic's own natural ordering ensure that any attempt
         // to become sleepy/asleep either will come before/after this
@@ -217,9 +258,8 @@ impl Sleep {
         // were were going to sleep, we will acquire lock and hence
         // acquire their reads.
         let old_state = self.state.swap(AWAKE, Ordering::Release);
-        log!(Tickle {
+        log!(TickleAll {
             source_worker: source_worker_index,
-            target_worker: target_worker_index,
             old_state: old_state,
         });
 
