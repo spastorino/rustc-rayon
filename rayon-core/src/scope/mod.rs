@@ -591,14 +591,14 @@ impl<'scope> ScopeBase<'scope> {
             });
         }
 
-        self.job_completed_latch.set_and_tickle(&self.registry);
+        self.job_completed_latch.set_and_tickle_one(&self.registry, self.owner_thread_index);
     }
 
     unsafe fn job_completed_ok(&self) {
         log!(JobCompletedOk {
             owner_thread: self.owner_thread_index
         });
-        self.job_completed_latch.set_and_tickle(&self.registry);
+        self.job_completed_latch.set_and_tickle_one(&self.registry, self.owner_thread_index);
     }
 
     unsafe fn steal_till_jobs_complete(&self, owner_thread: &WorkerThread) {

@@ -163,13 +163,33 @@ impl CountLatch {
 
     /// Decrements the latch counter by one. If this is the final
     /// count, then the latch is **set**, and calls to `probe()` will
-    /// return true. If the latch does wind up being set, we will
-    /// tickle the registry `registry`, which should be the registry
-    /// that owns this latch. (Only this registry ought to be probing
-    /// the count-lach.)
+    /// return true. Returns whether the latch was set. This is an
+    /// internal operation, as it does not tickle, and to fail to
+    /// tickle would lead to deadlock.
     #[inline]
-    pub(super) fn set_and_tickle(&self, registry: &Registry) {
-        if self.counter.fetch_sub(1, Ordering::SeqCst) == 1 {
+    fn set(&self) -> bool {
+        self.counter.fetch_sub(1, Ordering::SeqCst) == 1
+    }
+
+    /// Decrements the latch counter by one and possibly set it.  If
+    /// the latch is set, then all worker threads of the given
+    /// registry (which should be the one that owns this latch) are
+    /// tickled.
+    #[inline]
+    pub(super) fn set_and_tickle_all(&self, registry: &Registry) {
+        if self.set() {
+            registry.tickle_from_latch();
+        }
+    }
+
+    /// Decrements the latch counter by one and possibly set it.  If
+    /// the latch is set, then the specific worker thread is tickled,
+    /// which should be the one that owns this latch.
+    ///
+    /// FIXME: currently, we just tickle all threads.
+    #[inline]
+    pub(super) fn set_and_tickle_one(&self, registry: &Registry, _target_worker_index: usize) {
+        if self.set() {
             registry.tickle_from_latch();
         }
     }
