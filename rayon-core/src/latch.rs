@@ -44,6 +44,7 @@ pub(super) trait LatchProbe {
 pub(super) struct SpinLatch<'r> {
     b: AtomicBool,
     registry: &'r Registry,
+    target_worker_index: usize,
 }
 
 impl<'r> SpinLatch<'r> {
@@ -56,6 +57,7 @@ impl<'r> SpinLatch<'r> {
         SpinLatch {
             b: AtomicBool::new(false),
             registry: thread.registry(),
+            target_worker_index: thread.index(),
         }
     }
 }
@@ -71,7 +73,7 @@ impl<'r> Latch for SpinLatch<'r> {
     #[inline]
     fn set(&self) {
         self.b.store(true, Ordering::SeqCst);
-        self.registry.tickle_from_latch();
+        self.registry.tickle_worker(self.target_worker_index);
     }
 }
 
@@ -178,7 +180,7 @@ impl CountLatch {
     #[inline]
     pub(super) fn set_and_tickle_all(&self, registry: &Registry) {
         if self.set() {
-            registry.tickle_from_latch();
+            registry.tickle_all_workers();
         }
     }
 
@@ -188,9 +190,9 @@ impl CountLatch {
     ///
     /// FIXME: currently, we just tickle all threads.
     #[inline]
-    pub(super) fn set_and_tickle_one(&self, registry: &Registry, _target_worker_index: usize) {
+    pub(super) fn set_and_tickle_one(&self, registry: &Registry, target_worker_index: usize) {
         if self.set() {
-            registry.tickle_from_latch();
+            registry.tickle_worker(target_worker_index);
         }
     }
 }

@@ -152,19 +152,46 @@ impl Sleep {
         }
     }
 
-    pub(super) fn tickle(&self, worker_index: usize) {
+    /// A "tickle" is used to indicate that an event of interest has
+    /// occurred.
+    ///
+    /// The `source_worker_index` is the thread index that caused the
+    /// event, or `std::usize::MAX` if that is not readily
+    /// identified. This is used only for logging.
+    ///
+    /// The `target_worker_index` is the thread index to awaken, or
+    /// `std::usize::MAX` if the event is not targeting any specific
+    /// thread. This is used (e.g.) when a latch is set, to awaken
+    /// just the thread that was blocking on the latch.
+    ///
+    /// FIXME -- `target_worker_index` is currently unused but will be
+    /// used by the end of this PR series.
+    pub(super) fn tickle_one(&self, source_worker_index: usize, _target_worker_index: usize) {
+        self.tickle_all(source_worker_index);
+    }
+
+    /// See `tickle_one` -- this method is used to tickle any single
+    /// worker, but it doesn't matter which one. This occurs typically
+    /// when a new bit of stealable work has arrived.
+    pub(super) fn tickle_any(&self, source_worker_index: usize) {
+        self.tickle_all(source_worker_index);
+    }
+
+    /// See `tickle_one` -- this method is used to tickle all workers, but it doesn't
+    /// matter which one.
+    pub(super) fn tickle_all(&self, source_worker_index: usize) {
         // As described in README.md, this load must be SeqCst so as to ensure that:
         // - if anyone is sleepy or asleep, we *definitely* see that now (and not eventually);
         // - if anyone after us becomes sleepy or asleep, they see memory events that
         //   precede the call to `tickle()`, even though we did not do a write.
         let old_state = self.state.load(Ordering::SeqCst);
         if old_state != AWAKE {
-            self.tickle_cold(worker_index);
+            self.tickle_cold(source_worker_index, std::usize::MAX);
         }
     }
 
     #[cold]
-    fn tickle_cold(&self, worker_index: usize) {
+    fn tickle_cold(&self, source_worker_index: usize, target_worker_index: usize) {
         // The `Release` ordering here suffices. The reasoning is that
         // the atomic's own natural ordering ensure that any attempt
         // to become sleepy/asleep either will come before/after this
@@ -177,7 +204,8 @@ impl Sleep {
         // acquire their reads.
         let old_state = self.state.swap(AWAKE, Ordering::Release);
         log!(Tickle {
-            worker: worker_index,
+            source_worker: source_worker_index,
+            target_worker: target_worker_index,
             old_state: old_state,
         });
         if self.anyone_sleeping(old_state) {

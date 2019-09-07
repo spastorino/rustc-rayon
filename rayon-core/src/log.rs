@@ -15,7 +15,8 @@ use std::env;
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(super) enum Event {
     Tickle {
-        worker: usize,
+        source_worker: usize,
+        target_worker: usize,
         old_state: usize,
     },
     GetSleepy {

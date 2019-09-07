@@ -445,7 +445,8 @@ impl Registry {
         for &job_ref in injected_jobs {
             self.injected_jobs.push(job_ref);
         }
-        self.sleep.tickle(usize::MAX);
+
+        self.sleep.tickle_any(usize::MAX);
     }
 
     fn pop_injected_job(&self, worker_index: usize) -> Option<JobRef> {
@@ -563,8 +564,13 @@ impl Registry {
     }
 
     /// Invoked by a latch associated with this registry when it is set.
-    pub(super) fn tickle_from_latch(&self) {
-        self.sleep.tickle(usize::MAX);
+    pub(super) fn tickle_worker(&self, target_worker_index: usize) {
+        self.sleep.tickle_one(usize::MAX, target_worker_index);
+    }
+
+    /// Invoked by a latch associated with this registry when it is set.
+    pub(super) fn tickle_all_workers(&self) {
+        self.sleep.tickle_all(usize::MAX);
     }
 }
 
@@ -666,7 +672,7 @@ impl WorkerThread {
     #[inline]
     pub(super) unsafe fn push(&self, job: JobRef) {
         self.worker.push(job);
-        self.registry.sleep.tickle(self.index);
+        self.registry.sleep.tickle_any(self.index);
     }
 
     #[inline]
