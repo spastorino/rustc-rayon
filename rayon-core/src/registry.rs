@@ -154,7 +154,7 @@ pub(super) struct Registry {
     // - when `join()` or `scope()` is invoked, similarly, no adjustments are needed.
     //   These are always owned by some other job (e.g., one injected by `ThreadPool::install()`)
     //   and that job will keep the pool alive.
-    terminate_latch: CountLatch,
+    terminate_count: AtomicUsize,
 }
 
 /// ////////////////////////////////////////////////////////////////////////
@@ -239,7 +239,7 @@ impl Registry {
             thread_infos: stealers.into_iter().map(ThreadInfo::new).collect(),
             sleep: Sleep::new(n_threads),
             injected_jobs: SegQueue::new(),
-            terminate_latch: CountLatch::new(),
+            terminate_count: AtomicUsize::new(1),
             panic_handler: builder.take_panic_handler(),
             start_handler: builder.take_start_handler(),
             exit_handler: builder.take_exit_handler(),
@@ -437,8 +437,9 @@ impl Registry {
         // drops) a `ThreadPool`; and, in that case, they cannot be
         // calling `inject()` later, since they dropped their
         // `ThreadPool`.
-        assert!(
-            !self.terminate_latch.probe(),
+        debug_assert_ne!(
+            self.terminate_count.load(Ordering::Acquire),
+            0,
             "inject() sees state.terminate as true"
         );
 
@@ -553,24 +554,25 @@ impl Registry {
     /// terminate count and is responsible for invoking `terminate()`
     /// when finished.
     pub(super) fn increment_terminate_count(&self) {
-        self.terminate_latch.increment();
+        let previous = self.terminate_count.fetch_add(1, Ordering::AcqRel);
+        debug_assert!(previous != 0, "registry ref count incremented from zero");
+        assert!(previous != std::usize::MAX, "overflow in registry ref count");
     }
 
     /// Signals that the thread-pool which owns this registry has been
     /// dropped. The worker threads will gradually terminate, once any
     /// extant work is completed.
     pub(super) fn terminate(&self) {
-        self.terminate_latch.set_and_tickle_all(self);
+        if self.terminate_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            for (i, thread_info) in self.thread_infos.iter().enumerate() {
+                thread_info.terminate.set_and_tickle_one(self, i);
+            }
+        }
     }
 
     /// Invoked by a latch associated with this registry when it is set.
     pub(super) fn tickle_worker(&self, target_worker_index: usize) {
         self.sleep.tickle_one(usize::MAX, target_worker_index);
-    }
-
-    /// Invoked by a latch associated with this registry when it is set.
-    pub(super) fn tickle_all_workers(&self) {
-        self.sleep.tickle_all(usize::MAX);
     }
 }
 
@@ -589,6 +591,15 @@ struct ThreadInfo {
     /// until workers have stopped; only used for tests.
     stopped: LockLatch,
 
+    /// The latch used to signal that terminated has been requested.
+    /// This latch is *set* by the `terminate` method on the
+    /// `Registry`, once the registry's main "terminate" counter
+    /// reaches zero.
+    ///
+    /// NB. We use a `CountLatch` here because it has no lifetimes and is
+    /// meant for async use, but the count never gets higher than one.
+    terminate: CountLatch,
+
     /// the "stealer" half of the worker's deque
     stealer: Stealer<JobRef>,
 }
@@ -598,6 +609,7 @@ impl ThreadInfo {
         ThreadInfo {
             primed: LockLatch::new(),
             stopped: LockLatch::new(),
+            terminate: CountLatch::new(),
             stealer,
         }
     }
@@ -814,7 +826,8 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
         }
     }
 
-    worker_thread.wait_until(&registry.terminate_latch);
+    let my_terminate_latch = &registry.thread_infos[index].terminate;
+    worker_thread.wait_until(&my_terminate_latch);
 
     // Should not be any work left in our queue.
     debug_assert!(worker_thread.take_local_job().is_none());

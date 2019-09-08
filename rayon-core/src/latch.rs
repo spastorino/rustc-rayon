@@ -174,17 +174,6 @@ impl CountLatch {
     }
 
     /// Decrements the latch counter by one and possibly set it.  If
-    /// the latch is set, then all worker threads of the given
-    /// registry (which should be the one that owns this latch) are
-    /// tickled.
-    #[inline]
-    pub(super) fn set_and_tickle_all(&self, registry: &Registry) {
-        if self.set() {
-            registry.tickle_all_workers();
-        }
-    }
-
-    /// Decrements the latch counter by one and possibly set it.  If
     /// the latch is set, then the specific worker thread is tickled,
     /// which should be the one that owns this latch.
     ///

@@ -228,13 +228,9 @@ impl Sleep {
     /// See `tickle_one` -- this method is used to tickle any single
     /// worker, but it doesn't matter which one. This occurs typically
     /// when a new bit of stealable work has arrived.
+    ///
+    /// FIXME -- this presently tickles *all* workers.
     pub(super) fn tickle_any(&self, source_worker_index: usize) {
-        self.tickle_all(source_worker_index);
-    }
-
-    /// See `tickle_one` -- this method is used to tickle all workers, but it doesn't
-    /// matter which one.
-    pub(super) fn tickle_all(&self, source_worker_index: usize) {
         // As described in README.md, this load must be SeqCst so as to ensure that:
         // - if anyone is sleepy or asleep, we *definitely* see that now (and not eventually);
         // - if anyone after us becomes sleepy or asleep, they see memory events that
