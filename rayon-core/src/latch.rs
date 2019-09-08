@@ -28,7 +28,7 @@ use registry::{Registry, WorkerThread};
 /// - Once `set()` occurs, the next `probe()` *will* observe it.  This
 ///   typically requires a seq-cst ordering. See [the "tickle-then-get-sleepy" scenario in the sleep
 ///   README](/src/sleep/README.md#tickle-then-get-sleepy) for details.
-pub(super) trait Latch: LatchProbe {
+pub(super) trait Latch {
     /// Set the latch, signalling others.
     fn set(&self);
 }
@@ -108,15 +108,6 @@ impl LockLatch {
         while !*guard {
             guard = self.v.wait(guard).unwrap();
         }
-    }
-}
-
-impl LatchProbe for LockLatch {
-    #[inline]
-    fn probe(&self) -> bool {
-        // Not particularly efficient, but we don't really use this operation
-        let guard = self.m.lock().unwrap();
-        *guard
     }
 }
 
