@@ -1,5 +1,5 @@
 use job::StackJob;
-use latch::{LatchProbe, SpinLatch};
+use latch::SpinLatch;
 use log::Event::*;
 use registry::{self, WorkerThread};
 use std::any::Any;

@@ -17,29 +17,33 @@ pub(super) enum Event {
     TickleOne {
         source_worker: usize,
         target_worker: usize,
-        old_state: usize,
     },
-    TickleAll {
+    TickleAny {
         source_worker: usize,
-        old_state: usize,
+    },
+    TickleAnyTarget {
+        source_worker: usize,
+        target_worker: usize,
     },
     GetSleepy {
         worker: usize,
-        state: usize,
+        latch_addr: usize,
     },
     GotSleepy {
         worker: usize,
-        old_state: usize,
-        new_state: usize,
+        latch_addr: usize,
     },
     GotAwoken {
         worker: usize,
+        latch_addr: usize,
     },
     FellAsleep {
         worker: usize,
+        latch_addr: usize,
     },
     GotInterrupted {
         worker: usize,
+        latch_addr: usize,
     },
     FoundWork {
         worker: usize,
@@ -59,8 +63,12 @@ pub(super) enum Event {
     WaitUntil {
         worker: usize,
     },
-    LatchSet {
+    SawLatchSet {
         worker: usize,
+        latch_addr: usize,
+    },
+    LatchSet {
+        latch_addr: usize,
     },
     InjectJobs {
         count: usize,
@@ -91,6 +99,10 @@ pub(super) enum Event {
     },
     ScopeCompleteNoPanic {
         owner_thread: usize,
+    },
+    TerminateLatch {
+        worker: usize,
+        latch_addr: usize,
     },
 }
 

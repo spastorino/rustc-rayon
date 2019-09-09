@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use log::Event::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use registry::{Registry, WorkerThread};
 
@@ -33,16 +34,94 @@ pub(super) trait Latch {
     fn set(&self);
 }
 
-pub(super) trait LatchProbe {
-    /// Test if the latch is set.
-    fn probe(&self) -> bool;
+pub(super) trait AsCoreLatch {
+    fn as_core_latch(&self) -> &CoreLatch;
+}
+
+/// Latch is not set, owning thread is awake
+const UNSET: usize = 0;
+
+/// Latch is not set, owning thread is going to sleep on this latch
+/// (but has not yet fallen asleep).
+const SLEEPY: usize = 1;
+
+/// Latch is not set, owning thread is asleep on this latch and
+/// must be awoken.
+const SLEEPING: usize = 2;
+
+/// Latch is set.
+const SET: usize = 3;
+
+/// Spin latches are the simplest, most efficient kind, but they do
+/// not support a `wait()` operation. They just have a boolean flag
+/// that becomes true when `set()` is called.
+#[derive(Debug)]
+pub(super) struct CoreLatch {
+    state: AtomicUsize,
+}
+
+impl CoreLatch {
+    fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
+    /// Invoked by owning thread as it prepares to sleep. Returns true
+    /// if the owning thread may proceed to fall asleep, false if the
+    /// latch was set in the meantime.
+    pub(super) fn get_sleepy(&self) -> bool {
+        self
+            .state
+            .compare_exchange(UNSET, SLEEPY, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Invoked by owning thread as it falls asleep sleep. Returns
+    /// true if the owning thread should block, or false if the latch
+    /// was set in the meantime.
+    pub(super) fn fall_asleep(&self) -> bool {
+        self
+            .state
+            .compare_exchange(SLEEPY, SLEEPING, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Invoked by owning thread as it falls asleep sleep. Returns
+    /// true if the owning thread should block, or false if the latch
+    /// was set in the meantime.
+    pub(super) fn wake_up(&self) {
+        if !self.probe() {
+            let _ =
+                self
+                .state
+                .compare_exchange(SLEEPING, UNSET, Ordering::SeqCst, Ordering::Relaxed);
+        }
+    }
+
+    /// Set the latch. If this returns true, the owning thread was sleeping
+    /// and must be awoken.
+    ///
+    /// This is private because, typically, setting a latch involves
+    /// doing some wakeups; those are encapsulated in the surrounding
+    /// latch code.
+    fn set(&self) -> bool {
+        log!(LatchSet { latch_addr: self as *const _ as usize });
+        let old_state = self.state.swap(SET, Ordering::AcqRel);
+        old_state == SLEEPING
+    }
+
+    /// Test if this latch has been set.
+    pub(super) fn probe(&self) -> bool {
+        self.state.load(Ordering::Acquire) == SET
+    }
 }
 
 /// Spin latches are the simplest, most efficient kind, but they do
 /// not support a `wait()` operation. They just have a boolean flag
 /// that becomes true when `set()` is called.
 pub(super) struct SpinLatch<'r> {
-    b: AtomicBool,
+    core_latch: CoreLatch,
     registry: &'r Registry,
     target_worker_index: usize,
 }
@@ -55,25 +134,30 @@ impl<'r> SpinLatch<'r> {
     #[inline]
     pub(super) fn new(thread: &'r WorkerThread) -> SpinLatch {
         SpinLatch {
-            b: AtomicBool::new(false),
+            core_latch: CoreLatch::new(),
             registry: thread.registry(),
             target_worker_index: thread.index(),
         }
     }
+
+    pub(super) fn probe(&self) -> bool {
+        self.core_latch.probe()
+    }
 }
 
-impl<'r> LatchProbe for SpinLatch<'r> {
+impl<'r> AsCoreLatch for SpinLatch<'r> {
     #[inline]
-    fn probe(&self) -> bool {
-        self.b.load(Ordering::SeqCst)
+    fn as_core_latch(&self) -> &CoreLatch {
+        &self.core_latch
     }
 }
 
 impl<'r> Latch for SpinLatch<'r> {
     #[inline]
     fn set(&self) {
-        self.b.store(true, Ordering::SeqCst);
-        self.registry.tickle_worker(self.target_worker_index);
+        if self.core_latch.set() {
+            self.registry.tickle_worker(self.target_worker_index);
+        }
     }
 }
 
@@ -114,6 +198,8 @@ impl LockLatch {
 impl Latch for LockLatch {
     #[inline]
     fn set(&self) {
+        log!(LatchSet { latch_addr: self as *const _ as usize });
+
         let mut guard = self.m.lock().unwrap();
         *guard = true;
         self.v.notify_all();
@@ -137,6 +223,7 @@ impl Latch for LockLatch {
 /// contexts).
 #[derive(Debug)]
 pub(super) struct CountLatch {
+    core_latch: CoreLatch,
     counter: AtomicUsize,
 }
 
@@ -144,13 +231,14 @@ impl CountLatch {
     #[inline]
     pub(super) fn new() -> CountLatch {
         CountLatch {
+            core_latch: CoreLatch::new(),
             counter: AtomicUsize::new(1),
         }
     }
 
     #[inline]
     pub(super) fn increment(&self) {
-        debug_assert!(!self.probe());
+        debug_assert!(!self.core_latch.probe());
         self.counter.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -161,7 +249,12 @@ impl CountLatch {
     /// tickle would lead to deadlock.
     #[inline]
     fn set(&self) -> bool {
-        self.counter.fetch_sub(1, Ordering::SeqCst) == 1
+        if self.counter.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.core_latch.set();
+            true
+        } else {
+            false
+        }
     }
 
     /// Decrements the latch counter by one and possibly set it.  If
@@ -177,20 +270,10 @@ impl CountLatch {
     }
 }
 
-impl LatchProbe for CountLatch {
+impl AsCoreLatch for CountLatch {
     #[inline]
-    fn probe(&self) -> bool {
-        // Need to acquire any memory reads before latch was set:
-        self.counter.load(Ordering::SeqCst) == 0
-    }
-}
-
-impl<'a, L> LatchProbe for &'a L
-where
-    L: LatchProbe,
-{
-    fn probe(&self) -> bool {
-        L::probe(self)
+    fn as_core_latch(&self) -> &CoreLatch {
+        &self.core_latch
     }
 }
 

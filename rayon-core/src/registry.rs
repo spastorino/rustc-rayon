@@ -5,7 +5,7 @@ use internal::task::Task;
 #[cfg(rayon_unstable)]
 use job::Job;
 use job::{JobFifo, JobRef, StackJob};
-use latch::{CountLatch, Latch, LatchProbe, LockLatch, SpinLatch};
+use latch::{AsCoreLatch, CoreLatch, CountLatch, Latch, LockLatch, SpinLatch};
 use log::Event::*;
 use sleep::Sleep;
 use std::any::Any;
@@ -709,15 +709,16 @@ impl WorkerThread {
     /// Wait until the latch is set. Try to keep busy by popping and
     /// stealing tasks as necessary.
     #[inline]
-    pub(super) unsafe fn wait_until<L: LatchProbe + ?Sized>(&self, latch: &L) {
+    pub(super) unsafe fn wait_until<L: AsCoreLatch + ?Sized>(&self, latch: &L) {
         log!(WaitUntil { worker: self.index });
+        let latch = latch.as_core_latch();
         if !latch.probe() {
             self.wait_until_cold(latch);
         }
     }
 
     #[cold]
-    unsafe fn wait_until_cold<L: LatchProbe + ?Sized>(&self, latch: &L) {
+    unsafe fn wait_until_cold(&self, latch: &CoreLatch) {
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
@@ -740,7 +741,7 @@ impl WorkerThread {
                 yields = self.registry.sleep.work_found(self.index, yields);
                 self.execute(job);
             } else {
-                yields = self.registry.sleep.no_work_found(self.index, yields);
+                yields = self.registry.sleep.no_work_found(self.index, yields, latch);
             }
         }
 
@@ -749,7 +750,7 @@ impl WorkerThread {
         // wait.
         self.registry.sleep.work_found(self.index, yields);
 
-        log!(LatchSet { worker: self.index });
+        log!(SawLatchSet { worker: self.index, latch_addr: latch as *const _ as usize });
         mem::forget(abort_guard); // successful execution, do not abort
     }
 
@@ -827,7 +828,8 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
     }
 
     let my_terminate_latch = &registry.thread_infos[index].terminate;
-    worker_thread.wait_until(&my_terminate_latch);
+    log!(TerminateLatch { worker: index, latch_addr: my_terminate_latch as *const _ as usize });
+    worker_thread.wait_until(my_terminate_latch);
 
     // Should not be any work left in our queue.
     debug_assert!(worker_thread.take_local_job().is_none());
