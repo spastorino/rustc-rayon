@@ -4,6 +4,7 @@
 use crossbeam_utils::CachePadded;
 use latch::CoreLatch;
 use log::Event::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::usize;
@@ -12,6 +13,9 @@ pub(super) struct Sleep {
     /// One "sleep state" per worker. Used to track if a worker is sleeping and to have
     /// them block.
     worker_sleep_states: Vec<CachePadded<WorkerSleepState>>,
+
+    /// Number of sleeping threads
+    num_sleepers: AtomicUsize,
 }
 
 /// The "sleep state" for an individual worker.
@@ -27,7 +31,12 @@ impl Sleep {
     pub(super) fn new(n_threads: usize) -> Sleep {
         Sleep {
             worker_sleep_states: (0..n_threads).map(|_| Default::default()).collect(),
+            num_sleepers: AtomicUsize::new(0),
         }
+    }
+
+    fn all_asleep(&self) -> bool {
+        self.num_sleepers.load(Ordering::Relaxed) == self.worker_sleep_states.len()
     }
 
     #[inline]
@@ -108,9 +117,25 @@ impl Sleep {
             latch_addr: latch_addr,
         });
 
+        // Increase the count of the number of sleepers.
+        //
+        // Relaxed ordering suffices here because in no case do we
+        // gate other reads on this value.
+        self.num_sleepers.fetch_add(1, Ordering::Relaxed);
+
+        // Flag ourselves as asleep.
         *is_asleep = true;
+
         is_asleep = sleep_state.condvar.wait(is_asleep).unwrap();
+
+        // Flag ourselves as awake.
         *is_asleep = false;
+
+        // Decrease number of sleepers.
+        //
+        // Relaxed ordering suffices here because in no case do we
+        // gate other reads on this value.
+        self.num_sleepers.fetch_sub(1, Ordering::Relaxed);
 
         log!(GotAwoken {
             worker: worker_index,
@@ -149,20 +174,26 @@ impl Sleep {
     /// See `tickle_one` -- this method is used to tickle any single
     /// worker, but it doesn't matter which one. This occurs typically
     /// when a new bit of stealable work has arrived.
-    pub(super) fn tickle_any(&self, source_worker_index: usize) {
+    pub(super) fn tickle_any(
+        &self,
+        source_worker_index: usize,
+        idle_threads: bool,
+    ) {
         log!(TickleAny {
             source_worker: source_worker_index,
         });
 
-        for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
-            let is_asleep = sleep_state.is_asleep.lock().unwrap();
-            if *is_asleep {
-                sleep_state.condvar.notify_one();
-                log!(TickleAnyTarget {
-                    source_worker: source_worker_index,
-                    target_worker: i,
-                });
-                return;
+        if !idle_threads || self.all_asleep() {
+            for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
+                let is_asleep = sleep_state.is_asleep.lock().unwrap();
+                if *is_asleep {
+                    sleep_state.condvar.notify_one();
+                    log!(TickleAnyTarget {
+                        source_worker: source_worker_index,
+                        target_worker: i,
+                    });
+                    return;
+                }
             }
         }
     }
