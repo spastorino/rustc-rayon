@@ -21,7 +21,7 @@ struct WorkerSleepState {
     condvar: Condvar,
 }
 
-const ROUNDS_UNTIL_SLEEP: usize = 1;
+const ROUNDS_UNTIL_SLEEP: usize = 16;
 
 impl Sleep {
     pub(super) fn new(n_threads: usize) -> Sleep {
