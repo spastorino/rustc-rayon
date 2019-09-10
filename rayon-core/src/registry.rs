@@ -726,7 +726,7 @@ impl WorkerThread {
         // accesses, which would be *very bad*
         let abort_guard = unwind::AbortIfPanic;
 
-        let mut yields = 0;
+        let mut yields = self.registry.sleep.start_looking(self.index);
         while !latch.probe() {
             // Try to find some work to do. We give preference first
             // to things in our local deque, then in other workers
@@ -738,8 +738,9 @@ impl WorkerThread {
                 .or_else(|| self.steal())
                 .or_else(|| self.registry.pop_injected_job(self.index))
             {
-                yields = self.registry.sleep.work_found(self.index, yields);
+                self.registry.sleep.work_found(self.index, yields);
                 self.execute(job);
+                yields = self.registry.sleep.start_looking(self.index);
             } else {
                 yields = self.registry.sleep.no_work_found(self.index, yields, latch);
             }

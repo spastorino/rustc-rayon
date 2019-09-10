@@ -14,6 +14,10 @@ pub(super) struct Sleep {
     /// them block.
     worker_sleep_states: Vec<CachePadded<WorkerSleepState>>,
 
+    /// Number of idle threads looking for work -- though some of
+    /// these may be sleeping.
+    num_idle: AtomicUsize,
+
     /// Number of sleeping threads
     num_sleepers: AtomicUsize,
 }
@@ -31,17 +35,24 @@ impl Sleep {
     pub(super) fn new(n_threads: usize) -> Sleep {
         Sleep {
             worker_sleep_states: (0..n_threads).map(|_| Default::default()).collect(),
+            num_idle: AtomicUsize::new(0),
             num_sleepers: AtomicUsize::new(0),
         }
     }
 
     #[inline]
-    pub(super) fn work_found(&self, worker_index: usize, yields: usize) -> usize {
+    pub(super) fn start_looking(&self, _worker_index: usize) -> usize {
+        self.num_idle.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+
+    #[inline]
+    pub(super) fn work_found(&self, worker_index: usize, yields: usize) {
         log!(FoundWork {
             worker: worker_index,
             yields: yields,
         });
-        0
+        self.num_idle.fetch_sub(1, Ordering::Relaxed);
     }
 
     #[inline]
@@ -173,7 +184,7 @@ impl Sleep {
     pub(super) fn tickle_any(
         &self,
         source_worker_index: usize,
-        idle_threads: bool,
+        _idle_threads: bool,
     ) {
         log!(TickleAny {
             source_worker: source_worker_index,
@@ -184,8 +195,8 @@ impl Sleep {
             return;
         }
 
-        let all_asleep = num_sleepers == self.worker_sleep_states.len();
-        if idle_threads && !all_asleep {
+        let num_idle = self.num_idle.load(Ordering::Relaxed) - num_sleepers;
+        if num_idle > 0 {
             return;
         }
 
