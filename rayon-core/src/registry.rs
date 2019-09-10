@@ -447,7 +447,7 @@ impl Registry {
             self.injected_jobs.push(job_ref);
         }
 
-        self.sleep.tickle_any(usize::MAX, false);
+        self.sleep.tickle_any(usize::MAX, || false);
     }
 
     fn pop_injected_job(&self, worker_index: usize) -> Option<JobRef> {
@@ -684,7 +684,7 @@ impl WorkerThread {
     #[inline]
     pub(super) unsafe fn push(&self, job: JobRef) {
         self.worker.push(job);
-        self.registry.sleep.tickle_any(self.index, self.worker.is_empty());
+        self.registry.sleep.tickle_any(self.index, || self.worker.is_empty());
     }
 
     #[inline]
