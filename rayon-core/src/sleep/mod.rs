@@ -232,7 +232,6 @@ impl Sleep {
             return;
         }
 
-        let mut num_awake = self.worker_sleep_states.len() as u32 - num_sleepers;
         for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
             let is_asleep = sleep_state.is_asleep.lock().unwrap();
             if *is_asleep {
@@ -241,15 +240,8 @@ impl Sleep {
                     source_worker: source_worker_index,
                     target_worker: i,
                 });
-                num_awake += 1;
-                if is_power_of_2(num_awake) {
-                    return;
-                }
+                return;
             }
         }
     }
-}
-
-fn is_power_of_2(v: u32) -> bool {
-    (v & v.wrapping_sub(1)) == 0
 }
