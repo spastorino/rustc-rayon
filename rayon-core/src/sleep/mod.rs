@@ -35,10 +35,6 @@ impl Sleep {
         }
     }
 
-    fn all_asleep(&self) -> bool {
-        self.num_sleepers.load(Ordering::Relaxed) == self.worker_sleep_states.len()
-    }
-
     #[inline]
     pub(super) fn work_found(&self, worker_index: usize, yields: usize) -> usize {
         log!(FoundWork {
@@ -183,17 +179,25 @@ impl Sleep {
             source_worker: source_worker_index,
         });
 
-        if !idle_threads || self.all_asleep() {
-            for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
-                let is_asleep = sleep_state.is_asleep.lock().unwrap();
-                if *is_asleep {
-                    sleep_state.condvar.notify_one();
-                    log!(TickleAnyTarget {
-                        source_worker: source_worker_index,
-                        target_worker: i,
-                    });
-                    return;
-                }
+        let num_sleepers = self.num_sleepers.load(Ordering::Relaxed);
+        if num_sleepers == 0 {
+            return;
+        }
+
+        let all_asleep = num_sleepers == self.worker_sleep_states.len();
+        if idle_threads && !all_asleep {
+            return;
+        }
+
+        for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
+            let is_asleep = sleep_state.is_asleep.lock().unwrap();
+            if *is_asleep {
+                sleep_state.condvar.notify_one();
+                log!(TickleAnyTarget {
+                    source_worker: source_worker_index,
+                    target_worker: i,
+                });
+                return;
             }
         }
     }
