@@ -61,11 +61,17 @@ impl Sleep {
         self.thread_counts.fetch_sub(0x1_0000_0000, Ordering::Relaxed);
     }
 
+    /// Returns `(num_awake_but_idle, num_sleeping)`, the pair of:
+    ///
+    /// - the number of threads that are awake but idle, looking for work
+    /// - the number of threads that are asleep
     fn load_thread_counts(&self) -> (u32, u32) {
         // Relaxed suffices: we don't use these reads as a signal that
         // we can read some other memory.
         let thread_counts = self.thread_counts.load(Ordering::Relaxed);
-        (thread_counts as u32, (thread_counts >> 32) as u32)
+        let num_sleeping = (thread_counts >> 32) as u32;
+        let num_awake_but_idle = (thread_counts as u32) - num_sleeping;
+        (num_awake_but_idle, num_sleeping)
     }
 
     #[inline]
@@ -213,25 +219,32 @@ impl Sleep {
     pub(super) fn tickle_any(
         &self,
         source_worker_index: usize,
-        _idle_threads: impl FnOnce() -> bool,
+        was_empty: bool,
     ) {
         log!(TickleAny {
             source_worker: source_worker_index,
         });
 
-        let (num_idle, num_sleepers) = self.load_thread_counts();
+        let (num_awake_but_idle, num_sleepers) = self.load_thread_counts();
 
         if num_sleepers == 0 {
             // nobody to wake
             return;
         }
 
-        if num_idle > num_sleepers {
+        // we know we just pushed a new job -- but check also if the
+        // queue was empty before we pushed the job. If not, then we
+        // should wake *two* threads -- one to handle the previous
+        // contents of the queue, and one for the new job.
+        let desired_threads = (was_empty as u32) + 1;
+
+        if num_awake_but_idle >= desired_threads {
             // still have idle threads looking for work, don't go
             // waking up new ones
             return;
         }
 
+        let mut num_to_wake = std::cmp::min(desired_threads - num_awake_but_idle, num_sleepers);
         for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
             let is_asleep = sleep_state.is_asleep.lock().unwrap();
             if *is_asleep {
@@ -240,7 +253,11 @@ impl Sleep {
                     source_worker: source_worker_index,
                     target_worker: i,
                 });
-                return;
+
+                num_to_wake -= 1;
+                if num_to_wake == 0 {
+                    return;
+                }
             }
         }
     }
