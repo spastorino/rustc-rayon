@@ -443,13 +443,11 @@ impl Registry {
             "inject() sees state.terminate as true"
         );
 
-        let was_empty = self.injected_jobs.is_empty();
-
         for &job_ref in injected_jobs {
             self.injected_jobs.push(job_ref);
         }
 
-        self.sleep.tickle_any(usize::MAX, was_empty);
+        self.sleep.new_jobs(usize::MAX, injected_jobs.len() as u32);
     }
 
     fn pop_injected_job(&self, worker_index: usize) -> Option<JobRef> {
@@ -685,9 +683,8 @@ impl WorkerThread {
 
     #[inline]
     pub(super) unsafe fn push(&self, job: JobRef) {
-        let was_empty = self.worker.is_empty();
         self.worker.push(job);
-        self.registry.sleep.tickle_any(self.index, was_empty);
+        self.registry.sleep.new_jobs(self.index, 1);
     }
 
     #[inline]

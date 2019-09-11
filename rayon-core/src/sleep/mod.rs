@@ -212,14 +212,23 @@ impl Sleep {
         }
     }
 
-    /// See `tickle_one` -- this method is used to tickle any single
-    /// worker, but it doesn't matter which one. This occurs typically
-    /// when a new bit of stealable work has arrived.
+    /// Signals that `num_jobs` new jobs were pushed and made
+    /// available for idle workers to steal. This function will try to
+    /// ensure that there are threads available to service those jobs,
+    /// waking threads from sleep if necessary.
+    ///
+    /// # Parameters
+    ///
+    /// - `source_worker_index` -- index of the thread that did the
+    ///   push, or `usize::MAX` if this came from outside the thread
+    ///   pool -- it is used only for logging.
+    /// - `num_jobs` -- lower bound on number of jobs available for stealing.
+    ///   We'll try to get at least one thread per job.
     #[inline]
-    pub(super) fn tickle_any(
+    pub(super) fn new_jobs(
         &self,
         source_worker_index: usize,
-        was_empty: bool,
+        num_jobs: u32,
     ) {
         log!(TickleAny {
             source_worker: source_worker_index,
@@ -232,19 +241,13 @@ impl Sleep {
             return;
         }
 
-        // we know we just pushed a new job -- but check also if the
-        // queue was empty before we pushed the job. If not, then we
-        // should wake *two* threads -- one to handle the previous
-        // contents of the queue, and one for the new job.
-        let desired_threads = (was_empty as u32) + 1;
-
-        if num_awake_but_idle >= desired_threads {
+        if num_awake_but_idle >= num_jobs {
             // still have idle threads looking for work, don't go
             // waking up new ones
             return;
         }
 
-        let mut num_to_wake = std::cmp::min(desired_threads - num_awake_but_idle, num_sleepers);
+        let mut num_to_wake = std::cmp::min(num_jobs - num_awake_but_idle, num_sleepers);
         for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
             let is_asleep = sleep_state.is_asleep.lock().unwrap();
             if *is_asleep {
