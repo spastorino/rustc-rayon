@@ -4,7 +4,7 @@
 use crossbeam_utils::CachePadded;
 use latch::CoreLatch;
 use log::Event::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::usize;
@@ -17,7 +17,7 @@ pub(super) struct Sleep {
     /// Low-word: number of idle threads looking for work.
     ///
     /// High-word: number of sleeping threads. Note that a sleeping thread still counts as idle, too.
-    thread_counts: AtomicUsize,
+    thread_counts: AtomicU64,
 }
 
 /// The "sleep state" for an individual worker.
@@ -33,31 +33,50 @@ impl Sleep {
     pub(super) fn new(n_threads: usize) -> Sleep {
         Sleep {
             worker_sleep_states: (0..n_threads).map(|_| Default::default()).collect(),
-            thread_counts: AtomicUsize::new(0),
+            thread_counts: AtomicU64::new(0),
         }
     }
 
-    fn add_sleeping_thread(&self) {
+    fn add_idle_thread(&self) {
         // Relaxed suffices: we don't use these reads as a signal that
         // we can read some other memory.
         self.thread_counts.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn add_sleeping_thread(&self) {
+        // Relaxed suffices: we don't use these reads as a signal that
+        // we can read some other memory.
+        self.thread_counts.fetch_add(0x1_0000_0000, Ordering::Relaxed);
+    }
+
+    fn sub_idle_thread(&self) {
+        // Relaxed suffices: we don't use these reads as a signal that
+        // we can read some other memory.
+        self.thread_counts.fetch_sub(0x1, Ordering::Relaxed);
+    }
+
     fn sub_sleeping_thread(&self) {
         // Relaxed suffices: we don't use these reads as a signal that
         // we can read some other memory.
-        self.thread_counts.fetch_sub(1, Ordering::Relaxed);
+        self.thread_counts.fetch_sub(0x1_0000_0000, Ordering::Relaxed);
     }
 
-    /// Returns the number of threads that are asleep.
-    fn load_thread_counts(&self) -> usize {
+    /// Returns `(num_awake_but_idle, num_sleeping)`, the pair of:
+    ///
+    /// - the number of threads that are awake but idle, looking for work
+    /// - the number of threads that are asleep
+    fn load_thread_counts(&self) -> (u32, u32) {
         // Relaxed suffices: we don't use these reads as a signal that
         // we can read some other memory.
-        self.thread_counts.load(Ordering::Relaxed)
+        let thread_counts = self.thread_counts.load(Ordering::Relaxed);
+        let num_sleeping = (thread_counts >> 32) as u32;
+        let num_awake_but_idle = (thread_counts as u32) - num_sleeping;
+        (num_awake_but_idle, num_sleeping)
     }
 
     #[inline]
     pub(super) fn start_looking(&self, _worker_index: usize) -> usize {
+        self.add_idle_thread();
         0
     }
 
@@ -67,6 +86,7 @@ impl Sleep {
             worker: worker_index,
             yields: yields,
         });
+        self.sub_idle_thread();
     }
 
     #[inline]
@@ -205,31 +225,26 @@ impl Sleep {
             source_worker: source_worker_index,
         });
 
-        let num_sleepers = self.load_thread_counts();
-        let num_awake = self.worker_sleep_states.len() - num_sleepers;
+        let (num_awake_but_idle, num_sleepers) = self.load_thread_counts();
 
         if num_sleepers == 0 {
             // nobody to wake
             return;
         }
 
-        if num_awake > 0 {
-            // If there are threads awake, and our queue is empty,
-            // then they are doing a good job keeping our queue clear,
-            // so we can avoid waking any new threads.
-            if was_empty {
-                return;
-            }
-        }
-
-        // Otherwise, we need help!
-
         // we know we just pushed a new job -- but check also if the
         // queue was empty before we pushed the job. If not, then we
         // should wake *two* threads -- one to handle the previous
         // contents of the queue, and one for the new job.
-        let desired_threads = (was_empty as usize) + 1;
-        let mut num_to_wake = std::cmp::min(desired_threads, num_sleepers);
+        let desired_threads = (was_empty as u32) + 1;
+
+        if num_awake_but_idle >= desired_threads {
+            // still have idle threads looking for work, don't go
+            // waking up new ones
+            return;
+        }
+
+        let mut num_to_wake = std::cmp::min(desired_threads - num_awake_but_idle, num_sleepers);
         for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
             let is_asleep = sleep_state.is_asleep.lock().unwrap();
             if *is_asleep {
