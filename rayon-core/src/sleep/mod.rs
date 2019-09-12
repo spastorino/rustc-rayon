@@ -30,7 +30,7 @@ pub(super) struct IdleState {
     worker_index: usize,
 
     /// How many rounds have we been circling without sleeping?
-    rounds: usize,
+    rounds: u32,
 }
 
 /// The "sleep state" for an individual worker.
@@ -40,7 +40,7 @@ struct WorkerSleepState {
     condvar: Condvar,
 }
 
-const ROUNDS_UNTIL_SLEEP: usize = 16;
+const ROUNDS_UNTIL_SLEEP: u32 = 16;
 
 impl Sleep {
     pub(super) fn new(n_threads: usize) -> Sleep {

@@ -45,11 +45,11 @@ pub(super) enum Event {
     },
     FoundWork {
         worker: usize,
-        yields: usize,
+        yields: u32,
     },
     DidNotFindWork {
         worker: usize,
-        yields: usize,
+        yields: u32,
     },
     StoleWork {
         worker: usize,
