@@ -23,6 +23,10 @@ pub(super) enum Event {
         source_worker: usize,
         target_worker: usize,
     },
+    GotIdle {
+        worker: usize,
+        injection_count: u64,
+    },
     GetSleepy {
         worker: usize,
         latch_addr: usize,
@@ -39,9 +43,13 @@ pub(super) enum Event {
         worker: usize,
         latch_addr: usize,
     },
-    GotInterrupted {
+    GotInterruptedByLatch {
         worker: usize,
         latch_addr: usize,
+    },
+    GotInterruptedByInjectedJob {
+        worker: usize,
+        injection_count: u64,
     },
     FoundWork {
         worker: usize,
