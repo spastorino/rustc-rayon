@@ -260,6 +260,17 @@ impl Sleep {
             return;
         }
 
+        self.new_jobs_cold(source_worker_index, num_jobs, num_awake_but_idle, num_sleepers);
+    }
+
+    #[cold]
+    fn new_jobs_cold(
+        &self,
+        source_worker_index: usize,
+        num_jobs: u32,
+        num_awake_but_idle: u32,
+        num_sleepers: u32,
+    ) {
         let mut num_to_wake = std::cmp::min(num_jobs - num_awake_but_idle, num_sleepers);
         for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
             let is_asleep = sleep_state.is_asleep.lock().unwrap();
