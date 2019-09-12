@@ -20,6 +20,19 @@ pub(super) struct Sleep {
     thread_counts: AtomicU64,
 }
 
+/// An instance of this struct is created when a thread becomes idle.
+/// It is consumed when the thread finds work, and passed by `&mut`
+/// reference for operations that preserve the idle state. (In other
+/// words, producing one of these structs is evidence the thread is
+/// idle.) It tracks state such as how long the thread has been idle.
+pub(super) struct IdleState {
+    /// What is worker index of the idle thread?
+    worker_index: usize,
+
+    /// How many rounds have we been circling without sleeping?
+    rounds: usize,
+}
+
 /// The "sleep state" for an individual worker.
 #[derive(Default)]
 struct WorkerSleepState {
@@ -75,16 +88,16 @@ impl Sleep {
     }
 
     #[inline]
-    pub(super) fn start_looking(&self, _worker_index: usize) -> usize {
+    pub(super) fn start_looking(&self, worker_index: usize) -> IdleState {
         self.add_idle_thread();
-        0
+        IdleState { worker_index, rounds: 0 }
     }
 
     #[inline]
-    pub(super) fn work_found(&self, worker_index: usize, yields: usize) {
+    pub(super) fn work_found(&self, idle_state: IdleState) {
         log!(FoundWork {
-            worker: worker_index,
-            yields: yields,
+            worker: idle_state.worker_index,
+            yields: idle_state.rounds,
         });
         self.sub_idle_thread();
     }
@@ -92,27 +105,27 @@ impl Sleep {
     #[inline]
     pub(super) fn no_work_found(
         &self,
-        worker_index: usize,
-        yields: usize,
+        idle_state: &mut IdleState,
         latch: &CoreLatch,
-    ) -> usize {
+    ) {
         log!(DidNotFindWork {
-            worker: worker_index,
-            yields: yields,
+            worker: idle_state.worker_index,
+            yields: idle_state.rounds,
         });
-        if yields < ROUNDS_UNTIL_SLEEP {
+        if idle_state.rounds < ROUNDS_UNTIL_SLEEP {
             thread::yield_now();
-            yields + 1
+            idle_state.rounds += 1;
         } else {
-            debug_assert_eq!(yields, ROUNDS_UNTIL_SLEEP);
-            self.sleep(worker_index, latch);
-            0
+            debug_assert_eq!(idle_state.rounds, ROUNDS_UNTIL_SLEEP);
+            self.sleep(idle_state, latch);
+            idle_state.rounds = 0;
         }
     }
 
     #[cold]
-    fn sleep(&self, worker_index: usize, latch: &CoreLatch) {
+    fn sleep(&self, idle_state: &IdleState, latch: &CoreLatch) {
         let latch_addr = latch as *const CoreLatch as usize;
+        let worker_index = idle_state.worker_index;
 
         log!(GetSleepy {
             worker: worker_index,
