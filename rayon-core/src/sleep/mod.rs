@@ -4,7 +4,7 @@
 use crossbeam_utils::CachePadded;
 use latch::CoreLatch;
 use log::Event::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::usize;
@@ -19,13 +19,14 @@ pub(super) struct Sleep {
     /// High-word: number of sleeping threads. Note that a sleeping thread still counts as idle, too.
     thread_counts: AtomicU64,
 
-    /// Tracks the number of injected jobs (jobs inserted from outside
-    /// the thread pool).  Unlike internal jobs, injected jobs cannot
-    /// be "overlooked" or else we risk deadlock.  This means we have
-    /// to keep a separate atomic counter to track them. We prefer not
-    /// to do this for internal jobs so as to keep the `push`
-    /// operation lightweight.
-    injection_count: AtomicU64,
+    /// Tracks the current sleepy worker, or std::usize::MAX for none.
+    /// When workers go to sleep, they must go through a two step
+    /// process: first, they become the sleepy worker. Then they do
+    /// some number more "search" iterations until they finally go to
+    /// sleep. This extra transition allows us to avoid deadlock but
+    /// also helps to avoid workers going to sleep when there is work
+    /// to do.
+    sleepy_worker: AtomicUsize,
 }
 
 /// An instance of this struct is created when a thread becomes idle.
@@ -39,9 +40,6 @@ pub(super) struct IdleState {
 
     /// How many rounds have we been circling without sleeping?
     rounds: u32,
-
-    /// What was the injection count at the start of going idle?
-    injection_count: u64,
 }
 
 /// The "sleep state" for an individual worker.
@@ -51,14 +49,16 @@ struct WorkerSleepState {
     condvar: Condvar,
 }
 
-const ROUNDS_UNTIL_SLEEP: u32 = 16;
+const ROUNDS_UNTIL_SLEEPY: u32 = 16;
+const ROUNDS_UNTIL_SLEEPING: u32 = ROUNDS_UNTIL_SLEEPY + 1;
+const NO_SLEEPY_WORKER: usize = std::usize::MAX;
 
 impl Sleep {
     pub(super) fn new(n_threads: usize) -> Sleep {
         Sleep {
             worker_sleep_states: (0..n_threads).map(|_| Default::default()).collect(),
             thread_counts: AtomicU64::new(0),
-            injection_count: AtomicU64::new(0),
+            sleepy_worker: AtomicUsize::new(NO_SLEEPY_WORKER),
         }
     }
 
@@ -86,6 +86,45 @@ impl Sleep {
         self.thread_counts.fetch_sub(0x1_0000_0000, Ordering::Relaxed);
     }
 
+    fn is_sleepy_worker(&self, worker_index: usize) -> bool {
+        debug_assert!(worker_index != NO_SLEEPY_WORKER);
+        self.sleepy_worker.load(Ordering::SeqCst) == worker_index
+    }
+
+    /// Tries to become the sleepy worker. Returns true on success or
+    /// false if another worker was already sleepy.
+    fn become_sleepy_worker(&self, worker_index: usize) -> bool {
+        debug_assert!(worker_index != NO_SLEEPY_WORKER);
+        self.sleepy_worker.compare_exchange(NO_SLEEPY_WORKER, worker_index, Ordering::SeqCst, Ordering::Relaxed).is_ok()
+    }
+
+    /// Releases "sleepy worker" status. Returns true upon
+    /// success. Returns false if another job was injected in the
+    /// meantime, in which case our sleepy worker status was already
+    /// reverted.
+    fn revert_sleepy_worker(&self, worker_index: usize) -> bool {
+        debug_assert!(worker_index != NO_SLEEPY_WORKER);
+        self.sleepy_worker.compare_exchange(worker_index, NO_SLEEPY_WORKER, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    }
+
+    /// Checks if there is a sleepy worker and, if so, clears it.
+    ///
+    /// Returns true if there was a sleepy worker that was awoken.
+    /// This worker is guaranteed to search for injected or stealable
+    /// jobs at least one more time.
+    fn clear_sleepy_worker(&self) -> bool {
+        loop {
+            let w = self.sleepy_worker.load(Ordering::SeqCst);
+            if w == NO_SLEEPY_WORKER {
+                return false;
+            }
+
+            if self.sleepy_worker.compare_exchange(w, NO_SLEEPY_WORKER, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                return true;
+            }
+        }
+    }
+
     /// Returns `(num_awake_but_idle, num_sleeping)`, the pair of:
     ///
     /// - the number of threads that are awake but idle, looking for work
@@ -103,15 +142,11 @@ impl Sleep {
     pub(super) fn start_looking(&self, worker_index: usize) -> IdleState {
         self.add_idle_thread();
 
-        // This is W_I_READ, see `check_for_injected_job`.
-        let injection_count = self.injection_count.load(Ordering::SeqCst);
-
-        log!(GotIdle { worker: worker_index, injection_count });
+        log!(GotIdle { worker: worker_index, });
 
         IdleState {
             worker_index,
             rounds: 0,
-            injection_count,
         }
     }
 
@@ -134,11 +169,23 @@ impl Sleep {
             worker: idle_state.worker_index,
             yields: idle_state.rounds,
         });
-        if idle_state.rounds < ROUNDS_UNTIL_SLEEP {
+        if idle_state.rounds < ROUNDS_UNTIL_SLEEPY {
+            thread::yield_now();
+            idle_state.rounds += 1;
+        } else if idle_state.rounds == ROUNDS_UNTIL_SLEEPY {
+            if self.become_sleepy_worker(idle_state.worker_index) {
+                idle_state.rounds += 1;
+            }
+            thread::yield_now();
+        } else if !self.is_sleepy_worker(idle_state.worker_index) {
+            // Some work was injected in the meantime, switch back
+            // to our initial state.
+            idle_state.rounds = 0;
+        } else if idle_state.rounds < ROUNDS_UNTIL_SLEEPING {
             thread::yield_now();
             idle_state.rounds += 1;
         } else {
-            debug_assert_eq!(idle_state.rounds, ROUNDS_UNTIL_SLEEP);
+            debug_assert_eq!(idle_state.rounds, ROUNDS_UNTIL_SLEEPING);
             self.sleep(idle_state, latch);
             idle_state.rounds = 0;
         }
@@ -198,15 +245,32 @@ impl Sleep {
         // This is W_S_INC in `check_for_injected_job`.
         self.add_sleeping_thread();
 
-        // Flag ourselves as asleep.
-        *is_asleep = true;
+        // Block on the mutex -- but, importantly, we only do this if
+        // we can revert the "sleepy worker" status successfully.  If
+        // we fail to do so, that implies that a job was injected in
+        // between the time when we became sleepy and now.
+        //
+        // Important: we must do this revert *after* the call to
+        // `add_sleeping_thread`. This ensures that the injecting job
+        // either *reverts the sleepy state* or *sees a sleeping
+        // thread* (or both).
+        //
+        // If we were to revert the sleepy worker state before adding
+        // a sleeping thread, the injector might see nobody sleepy
+        // *or* sleeping.
+        if self.revert_sleepy_worker(worker_index) {
+            // Flag ourselves as asleep.
+            *is_asleep = true;
 
-        if self.check_for_injected_job(idle_state) {
             is_asleep = sleep_state.condvar.wait(is_asleep).unwrap();
-        }
 
-        // Flag ourselves as awake.
-        *is_asleep = false;
+            // Flag ourselves as awake.
+            *is_asleep = false;
+        } else {
+            log!(GotInterruptedByInjectedJob {
+                worker: worker_index,
+            });
+        }
 
         // Decrease number of sleepers.
         //
@@ -220,101 +284,6 @@ impl Sleep {
         });
 
         latch.wake_up();
-    }
-
-    // Subtle: we have to be very careful to avoid deadlock around
-    // injected jobs. Specifically, this scenario can arise. For
-    // simplicity, imagine there is only one worker and one
-    // non-worker, outside thread.
-    //
-    // - Worker thread: Go idle
-    // - Worker thread: Search for injected jobs, find nothing
-    // - Outside thread: Inject job, but no threads sleeping yet
-    // - Worker thread: Increment sleeping counter, go to sleep
-    // - Outside thread: Go to sleep waiting for job to be complete
-    //
-    // Now we are in a state of deadlock: the outside thread is
-    // sleeping, waiting for the job, but the worker thread didn't see
-    // it, and is also asleep. Ungreat. Note that this cannot happen
-    // from a `push` from inside the thread pool, as in that case the
-    // "outside thread" is itself a worker.
-    //
-    // To avoid this, we use the `injection_count` field. It is
-    // incremented whenever a new job is injected. Note that this
-    // field could wrap-around, that is not really a problem for
-    // us. The only thing that's important is that it changes.
-    //
-    // The protocol now for a worker thread to go to sleep is that
-    // it must do at least the following things. I'm going to name
-    // these events for convenience:
-    //
-    // - W_I_READ: Read injection counter and store the result, I (SeqCst).
-    //     - This occurs in `start_looking`, when the thread goes idle.
-    // - W_SEARCH: Search injection queue at least once (event Search).
-    // - W_S_INC: Increment the number of sleeping threads, S (SeqCst).
-    // - W_I_CHECK: Check that injection counter still has the value I (SeqCst).
-    //
-    // Meanwhile, the outside thread will do the following:
-    //
-    // - O_PUSH: Push a new job onto the injection queue.
-    // - O_I_INC: Increment the number of injected jobs (SeqCst)
-    // - O_S_CHECK: Check the number of sleeping threads, waking them if needed (SeqCst)
-    //
-    // If we examine each of the SeqCst options, we see that we cannot
-    // miss a wake-up now. For example, the scenario I outlined
-    // above had a prefix like this:
-    //
-    // - W_I_READ -- worker reads counter
-    // - W_SEARCH -- worker searches, sees nothing
-    // - O_PUSH -- outside thread pushes onto queue
-    // - O_I_INC -- increment number of injected jobs
-    // - O_S_CHECK -- outside thread checks for num sleepers, sees none
-    //
-    // But now, when the worker tries to go to sleep, it will fail
-    // the W_I_CHECK step, because the number of injected jobs
-    // has changed:
-    //
-    // - W_S_INC -- increment number of sleepers
-    // - W_I_CHECK -- check number of injected jobs, sees one, does not go to sleep
-    //
-    // The relevant orderings:
-    //
-    // - W_I_READ
-    // - ...
-    // - W_I_CHECK
-    // - O_I_INC
-    // - O_S_CHECK -- this will see the W_S_INC and wake the thread
-    //
-    // or
-    //
-    // - W_I_READ
-    // - ...
-    // - O_I_INC
-    // - ...
-    // - W_I_CHECK -- this will see the O_I_INC and wake the thread
-    //
-    // or
-    //
-    // - O_PUSH
-    // - O_I_INC
-    // - W_I_READ
-    // - W_SEARCH -- this will see the O_PUSH and find the job
-    fn check_for_injected_job(&self, idle_state: &mut IdleState) -> bool {
-        // This is W_I_CHECK.
-        let current_injection_count = self.injection_count.load(Ordering::SeqCst);
-
-        if current_injection_count == idle_state.injection_count {
-            // Actually sleep.
-            true
-        } else {
-            // Wake up immediately.
-            log!(GotInterruptedByInjectedJob {
-                worker: idle_state.worker_index,
-                injection_count: current_injection_count,
-            });
-            idle_state.injection_count = current_injection_count;
-            false
-        }
     }
 
     /// A "tickle" is used to indicate that an event of interest has
@@ -362,13 +331,7 @@ impl Sleep {
         source_worker_index: usize,
         num_jobs: u32,
     ) {
-        // This is O_I_INC
-        self.injection_count.fetch_add(1, Ordering::SeqCst);
-
-        // This is O_S_CHECK
-        let (num_awake_but_idle, num_sleepers) = self.load_thread_counts(Ordering::SeqCst);
-
-        self.new_jobs(source_worker_index, num_jobs, num_awake_but_idle, num_sleepers);
+        self.new_jobs(source_worker_index, num_jobs)
     }
 
     /// Signals that `num_jobs` new jobs were pushed onto a thread's
@@ -392,9 +355,7 @@ impl Sleep {
         source_worker_index: usize,
         num_jobs: u32,
     ) {
-        let (num_awake_but_idle, num_sleepers) = self.load_thread_counts(Ordering::Relaxed);
-
-        self.new_jobs(source_worker_index, num_jobs, num_awake_but_idle, num_sleepers);
+        self.new_jobs(source_worker_index, num_jobs)
     }
 
     /// Common helper for `new_injected_jobs` and `new_internal_jobs`.
@@ -402,13 +363,31 @@ impl Sleep {
     fn new_jobs(
         &self,
         source_worker_index: usize,
-        num_jobs: u32,
-        num_awake_but_idle: u32,
-        num_sleepers: u32,
+        mut num_jobs: u32,
     ) {
         log!(TickleAny {
             source_worker: source_worker_index,
         });
+
+        // If we clear a sleepy worker, then there is at least *one*
+        // idle worker.
+        if self.clear_sleepy_worker() {
+            num_jobs -= 1;
+            if num_jobs == 0 {
+                return;
+            }
+        }
+
+        // We can use relaxed here. Reasoning:
+        //
+        // - when going to sleep, we first increment the thread-count
+        //   and then (seqcst) clear the sleepy worker (op CLEAR) in
+        //   the same thread.
+        // - if we failed to clear sleepy worker, then our load comes (op LOAD)
+        //   after after the clear (op CLEAR).
+        // - therefore, our load should see all writes visible to CLEAR,
+        //   including the "sleeping thread" count increment.
+        let (num_awake_but_idle, num_sleepers) = self.load_thread_counts(Ordering::Relaxed);
 
         if num_sleepers == 0 {
             // nobody to wake

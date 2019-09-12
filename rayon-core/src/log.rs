@@ -27,7 +27,6 @@ pub(super) enum Event {
     },
     GotIdle {
         worker: usize,
-        injection_count: u64,
     },
     GetSleepy {
         worker: usize,
@@ -51,7 +50,6 @@ pub(super) enum Event {
     },
     GotInterruptedByInjectedJob {
         worker: usize,
-        injection_count: u64,
     },
     FoundWork {
         worker: usize,
