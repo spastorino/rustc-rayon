@@ -179,26 +179,30 @@ impl LockLatch {
 
     /// Block until latch is set, then resets this lock latch so it can be reused again.
     pub(super) fn wait_and_reset(&self) {
+        log!(LockLatchWaitAndReset { latch_addr: self as *const _ as usize });
         let mut guard = self.m.lock().unwrap();
         while !*guard {
             guard = self.v.wait(guard).unwrap();
         }
         *guard = false;
+        log!(LockLatchWaitAndResetComplete { latch_addr: self as *const _ as usize });
     }
 
     /// Block until latch is set.
     pub(super) fn wait(&self) {
+        log!(LockLatchWait { latch_addr: self as *const _ as usize });
         let mut guard = self.m.lock().unwrap();
         while !*guard {
             guard = self.v.wait(guard).unwrap();
         }
+        log!(LockLatchWaitComplete { latch_addr: self as *const _ as usize });
     }
 }
 
 impl Latch for LockLatch {
     #[inline]
     fn set(&self) {
-        log!(LatchSet { latch_addr: self as *const _ as usize });
+        log!(LockLatchSet { latch_addr: self as *const _ as usize });
 
         let mut guard = self.m.lock().unwrap();
         *guard = true;

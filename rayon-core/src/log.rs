@@ -68,6 +68,21 @@ pub(super) enum Event {
     LatchSet {
         latch_addr: usize,
     },
+    LockLatchSet {
+        latch_addr: usize,
+    },
+    LockLatchWait {
+        latch_addr: usize,
+    },
+    LockLatchWaitAndReset {
+        latch_addr: usize,
+    },
+    LockLatchWaitComplete {
+        latch_addr: usize,
+    },
+    LockLatchWaitAndResetComplete {
+        latch_addr: usize,
+    },
     InjectJobs {
         count: usize,
     },
