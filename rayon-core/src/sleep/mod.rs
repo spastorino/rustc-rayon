@@ -225,10 +225,11 @@ impl Sleep {
         }
     }
 
-    /// Signals that `num_jobs` new jobs were pushed and made
-    /// available for idle workers to steal. This function will try to
-    /// ensure that there are threads available to service those jobs,
-    /// waking threads from sleep if necessary.
+
+    /// Signals that `num_jobs` new jobs were injected into the thread
+    /// pool from outside. This function will ensure that there are
+    /// threads available to process them, waking threads from sleep
+    /// if necessary.
     ///
     /// # Parameters
     ///
@@ -238,7 +239,41 @@ impl Sleep {
     /// - `num_jobs` -- lower bound on number of jobs available for stealing.
     ///   We'll try to get at least one thread per job.
     #[inline]
-    pub(super) fn new_jobs(
+    pub(super) fn new_injected_jobs(
+        &self,
+        source_worker_index: usize,
+        num_jobs: u32,
+    ) {
+        self.new_jobs(source_worker_index, num_jobs);
+    }
+
+    /// Signals that `num_jobs` new jobs were pushed onto a thread's
+    /// local deque. This function will try to ensure that there are
+    /// threads available to process them, waking threads from sleep
+    /// if necessary. However, this is not guaranteed: under certain
+    /// race conditions, the function may fail to wake any new
+    /// threads; in that case the existing thread should eventually
+    /// pop the job.
+    ///
+    /// # Parameters
+    ///
+    /// - `source_worker_index` -- index of the thread that did the
+    ///   push, or `usize::MAX` if this came from outside the thread
+    ///   pool -- it is used only for logging.
+    /// - `num_jobs` -- lower bound on number of jobs available for stealing.
+    ///   We'll try to get at least one thread per job.
+    #[inline]
+    pub(super) fn new_internal_jobs(
+        &self,
+        source_worker_index: usize,
+        num_jobs: u32,
+    ) {
+        self.new_jobs(source_worker_index, num_jobs);
+    }
+
+    /// Common helper for `new_injected_jobs` and `new_internal_jobs`.
+    #[inline]
+    fn new_jobs(
         &self,
         source_worker_index: usize,
         num_jobs: u32,

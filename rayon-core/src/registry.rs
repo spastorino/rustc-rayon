@@ -447,7 +447,7 @@ impl Registry {
             self.injected_jobs.push(job_ref);
         }
 
-        self.sleep.new_jobs(usize::MAX, injected_jobs.len() as u32);
+        self.sleep.new_injected_jobs(usize::MAX, injected_jobs.len() as u32);
     }
 
     fn pop_injected_job(&self, worker_index: usize) -> Option<JobRef> {
@@ -684,7 +684,7 @@ impl WorkerThread {
     #[inline]
     pub(super) unsafe fn push(&self, job: JobRef) {
         self.worker.push(job);
-        self.registry.sleep.new_jobs(self.index, 1);
+        self.registry.sleep.new_internal_jobs(self.index, 1);
     }
 
     #[inline]
