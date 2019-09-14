@@ -57,7 +57,7 @@ struct WorkerSleepState {
     condvar: Condvar,
 }
 
-const ROUNDS_UNTIL_SLEEPY: u32 = 128;
+const ROUNDS_UNTIL_SLEEPY: u32 = 32;
 const ROUNDS_UNTIL_SLEEPING: u32 = ROUNDS_UNTIL_SLEEPY + 1;
 
 /// A value of 1 in the "most significant word" (that is, the upper 32
