@@ -28,6 +28,19 @@ pub(super) enum Event {
     GotIdle {
         worker: usize,
     },
+    AnnouncedSleepy {
+        worker: usize,
+        sleepy_counter: u32,
+    },
+    JobAnnounceEq {
+        worker: usize,
+        jobs_counter: u32,
+    },
+    JobAnnounceBump {
+        worker: usize,
+        jobs_counter: u32,
+        sleepy_counter: u32,
+    },
     GetSleepy {
         worker: usize,
         latch_addr: usize,
