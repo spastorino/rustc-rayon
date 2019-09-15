@@ -1,18 +1,17 @@
 //! Debug Logging
 //!
-//! To use in a debug build, set the env var `RAYON_LOG=1`.  In a
-//! release build, logs are compiled out. You will have to change
-//! `DUMP_LOGS` to be `true`.
+//! To use in a debug build, set the env var `RAYON_RS_LOG=1`.  In a
+//! release build, logs are compiled out by default unless Rayon is built
+//! with `--cfg rayon_rs_log` (try `RUSTFLAGS="--cfg rayon_rs_log"`).
 //!
-//! **Old environment variable:** `RAYON_LOG` is a one-to-one
-//! replacement of the now deprecated `RAYON_RS_LOG` environment
-//! variable, which is still supported for backwards compatibility.
+//! Note that logs are an internally debugging tool and their format
+//! is considered unstable, as are the details of how to enable them.
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions,rayon_rs_log))]
 use std::env;
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[cfg_attr(not(debug_assertions), allow(dead_code))]
+#[cfg_attr(any(debug_assertions,rayon_rs_log), derive(Debug))]
+#[cfg_attr(not(any(debug_assertions,rayon_rs_log)), allow(dead_code))]
 pub(super) enum Event {
     TickleOne {
         source_worker: usize,
@@ -140,13 +139,12 @@ pub(super) enum Event {
     },
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions,rayon_rs_log))]
 lazy_static! {
-    pub(super) static ref LOG_ENV: bool =
-        env::var("RAYON_LOG").is_ok() || env::var("RAYON_RS_LOG").is_ok();
+    pub(super) static ref LOG_ENV: bool = env::var("RAYON_RS_LOG").is_ok();
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions,rayon_rs_log))]
 macro_rules! log {
     ($event:expr) => {
         if *$crate::log::LOG_ENV {
@@ -155,7 +153,7 @@ macro_rules! log {
     };
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(debug_assertions,rayon_rs_log)))]
 macro_rules! log {
     ($event:expr) => {
         if false {
