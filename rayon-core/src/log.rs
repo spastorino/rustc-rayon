@@ -19,8 +19,15 @@ pub(super) enum Event {
     },
     TickleAny {
         source_worker: usize,
+        num_jobs: u32,
     },
-    TickleAnyTarget {
+    TickleAnyThreadCounts {
+        source_worker: usize,
+        num_jobs: u32,
+        num_awake_but_idle: u32,
+        num_sleepers: u32,
+    },
+    TickleAnyWakeThread {
         source_worker: usize,
         target_worker: usize,
     },

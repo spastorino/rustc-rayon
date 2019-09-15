@@ -411,6 +411,7 @@ impl Sleep {
     ) {
         log!(TickleAny {
             source_worker: source_worker_index,
+            num_jobs: num_jobs,
         });
 
         self.announce_job(source_worker_index);
@@ -425,6 +426,13 @@ impl Sleep {
         // - therefore, our load should see all writes visible to CLEAR,
         //   including the "sleeping thread" count increment.
         let (num_awake_but_idle, num_sleepers) = self.load_thread_counts(Ordering::Relaxed);
+
+        log!(TickleAnyThreadCounts {
+            source_worker: source_worker_index,
+            num_jobs: num_jobs,
+            num_awake_but_idle: num_awake_but_idle,
+            num_sleepers: num_sleepers,
+        });
 
         if num_sleepers == 0 {
             // nobody to wake
