@@ -162,6 +162,17 @@ impl Sleep {
     }
 
     fn announce_job(&self, worker_index: usize) {
+        let counters = self.j_s_counters.load(Ordering::SeqCst);
+        let (jobs_counter, sleepy_counter) = Self::split_j_s_counters(counters);
+        if jobs_counter.0 == sleepy_counter.0 {
+            log!(JobAnnounceEq { worker: worker_index, jobs_counter: jobs_counter.0 });
+            return;
+        }
+
+        self.announce_job_cold(worker_index);
+    }
+
+    fn announce_job_cold(&self, worker_index: usize) {
         loop {
             let counters = self.j_s_counters.load(Ordering::SeqCst);
             let (jobs_counter, sleepy_counter) = Self::split_j_s_counters(counters);
