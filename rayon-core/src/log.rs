@@ -7,11 +7,11 @@
 //! Note that logs are an internally debugging tool and their format
 //! is considered unstable, as are the details of how to enable them.
 
-#[cfg(any(debug_assertions,rayon_rs_log))]
 use std::env;
 
-#[cfg_attr(any(debug_assertions,rayon_rs_log), derive(Debug))]
-#[cfg_attr(not(any(debug_assertions,rayon_rs_log)), allow(dead_code))]
+pub(super) const LOGS_COMPILED_IN: bool = cfg!(any(debug_assertions,rayon_rs_log));
+
+#[derive(Debug)]
 pub(super) enum Event {
     TickleOne {
         source_worker: usize,
@@ -146,27 +146,14 @@ pub(super) enum Event {
     },
 }
 
-#[cfg(any(debug_assertions,rayon_rs_log))]
 lazy_static! {
     pub(super) static ref LOG_ENV: bool = env::var("RAYON_RS_LOG").is_ok();
 }
 
-#[cfg(any(debug_assertions,rayon_rs_log))]
 macro_rules! log {
     ($event:expr) => {
-        if *$crate::log::LOG_ENV {
+        if $crate::log::LOGS_COMPILED_IN && *$crate::log::LOG_ENV {
             eprintln!("{:?}", $event);
-        }
-    };
-}
-
-#[cfg(not(any(debug_assertions,rayon_rs_log)))]
-macro_rules! log {
-    ($event:expr) => {
-        if false {
-            // Expand `$event` so it still appears used, but without
-            // any of the formatting code to be optimized away.
-            $event;
         }
     };
 }
