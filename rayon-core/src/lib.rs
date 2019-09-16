@@ -32,11 +32,10 @@ use std::io;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
+extern crate crossbeam_channel;
 extern crate crossbeam_deque;
 extern crate crossbeam_queue;
 extern crate crossbeam_utils;
-#[macro_use]
-extern crate lazy_static;
 extern crate num_cpus;
 
 #[cfg(test)]

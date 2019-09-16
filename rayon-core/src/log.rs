@@ -7,7 +7,10 @@
 //! Note that logs are an internally debugging tool and their format
 //! is considered unstable, as are the details of how to enable them.
 
+use crossbeam_channel::{self, Sender, Receiver};
 use std::env;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 pub(super) const LOGS_COMPILED_IN: bool = cfg!(any(debug_assertions,rayon_rs_log));
 
@@ -92,24 +95,6 @@ pub(super) enum Event {
         worker: usize,
         latch_addr: usize,
     },
-    LatchSet {
-        latch_addr: usize,
-    },
-    LockLatchSet {
-        latch_addr: usize,
-    },
-    LockLatchWait {
-        latch_addr: usize,
-    },
-    LockLatchWaitAndReset {
-        latch_addr: usize,
-    },
-    LockLatchWaitComplete {
-        latch_addr: usize,
-    },
-    LockLatchWaitAndResetComplete {
-        latch_addr: usize,
-    },
     InjectJobs {
         count: usize,
     },
@@ -146,14 +131,57 @@ pub(super) enum Event {
     },
 }
 
-lazy_static! {
-    pub(super) static ref LOG_ENV: bool = env::var("RAYON_RS_LOG").is_ok();
+/// Handle to the logging thread, if any. You can use this to deliver
+/// logs. You can also clone it freely.
+#[derive(Clone)]
+pub(super) struct Logger {
+    sender: Option<Sender<Event>>,
 }
 
-macro_rules! log {
-    ($event:expr) => {
-        if $crate::log::LOGS_COMPILED_IN && *$crate::log::LOG_ENV {
-            eprintln!("{:?}", $event);
+impl Logger {
+    pub(super) fn new() -> Logger {
+        if !LOGS_COMPILED_IN {
+            return Self::disabled();
         }
-    };
+
+        let env_log = match env::var("RAYON_RS_LOG") {
+            Ok(s) => s,
+            Err(_) => return Self::disabled(),
+        };
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        ::std::thread::spawn(move || Self::logger_thread(env_log, receiver));
+
+        return Logger { sender: Some(sender) };
+    }
+
+    fn disabled() -> Logger {
+        Logger { sender: None }
+    }
+
+    #[inline]
+    pub(super) fn log(&self, event: impl FnOnce() -> Event) {
+        if !LOGS_COMPILED_IN {
+            return;
+        }
+
+        if let Some(sender) = &self.sender {
+            sender.send(event()).unwrap();
+        }
+    }
+
+    fn logger_thread(
+        log_filename: String,
+        receiver: Receiver<Event>,
+    ) {
+        let file = File::create(&log_filename).unwrap_or_else(|err| {
+            panic!("failed to open `{}`: {}", log_filename, err)
+        });
+
+        let mut writer = BufWriter::new(file);
+        for event in receiver {
+            write!(writer, "{:?}\n", event).unwrap();
+            writer.flush().unwrap();
+        }
+    }
 }

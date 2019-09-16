@@ -3,6 +3,7 @@
 
 use crossbeam_utils::CachePadded;
 use latch::CoreLatch;
+use log::Logger;
 use log::Event::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -10,6 +11,8 @@ use std::thread;
 use std::usize;
 
 pub(super) struct Sleep {
+    logger: Logger,
+
     /// One "sleep state" per worker. Used to track if a worker is sleeping and to have
     /// them block.
     worker_sleep_states: Vec<CachePadded<WorkerSleepState>>,
@@ -71,8 +74,9 @@ const MSW_ONE: u64 = 0x1_0000_0000;
 const LSW_ONE: u64 = 0x1;
 
 impl Sleep {
-    pub(super) fn new(n_threads: usize) -> Sleep {
+    pub(super) fn new(logger: Logger, n_threads: usize) -> Sleep {
         Sleep {
+            logger,
             worker_sleep_states: (0..n_threads).map(|_| Default::default()).collect(),
             thread_counts: AtomicU64::new(0),
             j_s_counters: AtomicU64::new(0),
@@ -148,13 +152,13 @@ impl Sleep {
             let (_, sleepy_counter) = Self::split_j_s_counters(counters);
             if sleepy_counter.0 == std::u32::MAX {
                 if self.j_s_counters.compare_exchange(counters, 0, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                    log!(AnnouncedSleepy { worker: worker_index, sleepy_counter: 0 });
+                    self.logger.log(|| AnnouncedSleepy { worker: worker_index, sleepy_counter: 0 });
                     return SleepyCounter(0);
                 }
             } else {
                 let counters1 = Self::increment_sleepy_counter(counters);
                 if self.j_s_counters.compare_exchange(counters, counters1, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                    log!(AnnouncedSleepy { worker: worker_index, sleepy_counter: sleepy_counter.0 });
+                    self.logger.log(|| AnnouncedSleepy { worker: worker_index, sleepy_counter: sleepy_counter.0 });
                     return sleepy_counter;
                 }
             }
@@ -165,7 +169,7 @@ impl Sleep {
         let counters = self.j_s_counters.load(Ordering::SeqCst);
         let (jobs_counter, sleepy_counter) = Self::split_j_s_counters(counters);
         if jobs_counter.0 == sleepy_counter.0 {
-            log!(JobAnnounceEq { worker: worker_index, jobs_counter: jobs_counter.0 });
+            self.logger.log(|| JobAnnounceEq { worker: worker_index, jobs_counter: jobs_counter.0 });
             return;
         }
 
@@ -177,13 +181,13 @@ impl Sleep {
             let counters = self.j_s_counters.load(Ordering::SeqCst);
             let (jobs_counter, sleepy_counter) = Self::split_j_s_counters(counters);
             if jobs_counter.0 == sleepy_counter.0 {
-                log!(JobAnnounceEq { worker: worker_index, jobs_counter: jobs_counter.0 });
+                self.logger.log(|| JobAnnounceEq { worker: worker_index, jobs_counter: jobs_counter.0 });
                 return;
             }
 
             let counters1 = Self::replicate_sleepy_counter(sleepy_counter);
             if self.j_s_counters.compare_exchange(counters, counters1, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                log!(JobAnnounceBump {
+                self.logger.log(|| JobAnnounceBump {
                     worker: worker_index,
                     jobs_counter: jobs_counter.0,
                     sleepy_counter: sleepy_counter.0,
@@ -216,7 +220,7 @@ impl Sleep {
     pub(super) fn start_looking(&self, worker_index: usize) -> IdleState {
         self.add_idle_thread();
 
-        log!(GotIdle { worker: worker_index, });
+        self.logger.log(|| GotIdle { worker: worker_index, });
 
         IdleState {
             worker_index,
@@ -227,7 +231,7 @@ impl Sleep {
 
     #[inline]
     pub(super) fn work_found(&self, idle_state: IdleState) {
-        log!(FoundWork {
+        self.logger.log(|| FoundWork {
             worker: idle_state.worker_index,
             yields: idle_state.rounds,
         });
@@ -244,7 +248,7 @@ impl Sleep {
         idle_state: &mut IdleState,
         latch: &CoreLatch,
     ) {
-        log!(DidNotFindWork {
+        self.logger.log(|| DidNotFindWork {
             worker: idle_state.worker_index,
             yields: idle_state.rounds,
         });
@@ -269,13 +273,13 @@ impl Sleep {
         let latch_addr = latch as *const CoreLatch as usize;
         let worker_index = idle_state.worker_index;
 
-        log!(GetSleepy {
+        self.logger.log(|| GetSleepy {
             worker: worker_index,
             latch_addr: latch_addr,
         });
 
         if !latch.get_sleepy() {
-            log!(GotInterruptedByLatch {
+            self.logger.log(|| GotInterruptedByLatch {
                 worker: worker_index,
                 latch_addr: latch_addr,
             });
@@ -283,7 +287,7 @@ impl Sleep {
             return;
         }
 
-        log!(GotSleepy {
+        self.logger.log(|| GotSleepy {
             worker: worker_index,
             latch_addr: latch_addr,
         });
@@ -293,7 +297,7 @@ impl Sleep {
         debug_assert!(!*is_asleep);
 
         if !latch.fall_asleep() {
-            log!(GotInterruptedByLatch {
+            self.logger.log(|| GotInterruptedByLatch {
                 worker: worker_index,
                 latch_addr: latch_addr,
             });
@@ -308,7 +312,7 @@ impl Sleep {
         // problem for us, we'll just loop around and maybe get
         // sleepy again.
 
-        log!(FellAsleep {
+        self.logger.log(|| FellAsleep {
             worker: worker_index,
             latch_addr: latch_addr,
         });
@@ -332,7 +336,7 @@ impl Sleep {
             idle_state.rounds = 0;
             idle_state.sleepy_counter = INVALID_SLEEPY_COUNTER;
         } else {
-            log!(GotInterruptedByInjectedJob {
+            self.logger.log(|| GotInterruptedByInjectedJob {
                 worker: worker_index,
             });
 
@@ -346,7 +350,7 @@ impl Sleep {
         // gate other reads on this value.
         self.sub_sleeping_thread();
 
-        log!(GotAwoken {
+        self.logger.log(|| GotAwoken {
             worker: worker_index,
             latch_addr,
         });
@@ -366,7 +370,7 @@ impl Sleep {
     /// thread. This is used (e.g.) when a latch is set, to awaken
     /// just the thread that was blocking on the latch.
     pub(super) fn tickle_one(&self, source_worker_index: usize, target_worker_index: usize) {
-        log!(TickleOne {
+        self.logger.log(|| TickleOne {
             source_worker: source_worker_index,
             target_worker: target_worker_index,
         });
@@ -433,7 +437,7 @@ impl Sleep {
         source_worker_index: usize,
         num_jobs: u32,
     ) {
-        log!(TickleAny {
+        self.logger.log(|| TickleAny {
             source_worker: source_worker_index,
             num_jobs: num_jobs,
         });
@@ -451,7 +455,7 @@ impl Sleep {
         //   including the "sleeping thread" count increment.
         let (num_awake_but_idle, num_sleepers) = self.load_thread_counts(Ordering::Relaxed);
 
-        log!(TickleAnyThreadCounts {
+        self.logger.log(|| TickleAnyThreadCounts {
             source_worker: source_worker_index,
             num_jobs: num_jobs,
             num_awake_but_idle: num_awake_but_idle,
@@ -483,7 +487,7 @@ impl Sleep {
             let is_asleep = sleep_state.is_asleep.lock().unwrap();
             if *is_asleep {
                 sleep_state.condvar.notify_one();
-                log!(TickleAnyWakeThread {
+                self.logger.log(|| TickleAnyWakeThread {
                     source_worker: source_worker_index,
                     target_worker: i,
                 });
