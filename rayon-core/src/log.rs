@@ -12,123 +12,148 @@ use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-pub(super) const LOGS_COMPILED_IN: bool = cfg!(any(debug_assertions,rayon_rs_log));
+/// True if logs are compiled in.
+pub(super) const LOG_ENABLED: bool = cfg!(rayon_rs_log);
 
 #[derive(Debug)]
 pub(super) enum Event {
-    TickleOne {
-        source_worker: usize,
-        target_worker: usize,
-    },
-    TickleAny {
-        source_worker: usize,
-        num_jobs: u32,
-    },
-    TickleAnyThreadCounts {
-        source_worker: usize,
-        num_jobs: u32,
-        num_awake_but_idle: u32,
-        num_sleepers: u32,
-    },
-    TickleAnyWakeThread {
-        source_worker: usize,
-        target_worker: usize,
-    },
-    GotIdle {
-        worker: usize,
-    },
-    AnnouncedSleepy {
-        worker: usize,
-        sleepy_counter: u32,
-    },
+    /// Flushes events to disk, used to terminate benchmarking.
+    Flush,
+
+    /// Indicates that a worker thread started execution.
+    ThreadStart { worker: usize, terminate_addr: usize },
+
+    /// Indicates that a worker thread became idle, blocked on `latch_addr`.
+    ThreadIdle { worker: usize, latch_addr: usize },
+
+    /// Indicates that an idle worker thread found work to do, after
+    /// yield rounds. It should no longer be considered idle.
+    ThreadFoundWork { worker: usize, yields: u32 },
+
+    /// Indicates that a worker blocked on a latch observed that it was set.
+    ///
+    /// Internal debugging event that does not affect the state
+    /// machine.
+    ThreadSawLatchSet { worker: usize, latch_addr: usize },
+
+    /// Indicates that an idle worker thread searched for another round without finding work.
+    ThreadNoWork { worker: usize, yields: u32 },
+
+    /// Indicates that an idle worker is getting sleepy. `sleepy_counter` is the internal
+    /// sleep state that we saw at the time.
+    ThreadSleepy { worker: usize, sleepy_counter: u32 },
+
+    /// Indicates that the thread's attempt to fall asleep was
+    /// interrupted because the latch was set. (This is not, in and of
+    /// itself, a change to the thread state.)
+    ThreadSleepInterruptedByLatch { worker: usize, latch_addr: usize },
+
+    /// Indicates that the thread's attempt to fall asleep was
+    /// interrupted because a job was posted. (This is not, in and of
+    /// itself, a change to the thread state.)
+    ThreadSleepInterruptedByJob { worker: usize },
+
+    /// Indicates that an idle worker has gone to sleep.
+    ThreadSleeping { worker: usize, latch_addr: usize },
+
+    /// Indicates that a sleeping worker has awoken.
+    ThreadAwoken { worker: usize, latch_addr: usize },
+
+    /// Indicates that the given worker thread was notified it should
+    /// awaken because its latch was set.
+    ThreadNotifyLatch { worker: usize },
+
+    /// Indicates that the given worker thread was notified it should
+    /// awake because new work may be available.
+    ThreadNotifyJob { source_worker: usize, target_worker: usize },
+
+    /// The given worker has pushed a job to its local deque.
+    JobPushed { worker: usize },
+
+    /// The given worker has popped a job from its local deque.
+    JobPopped { worker: usize },
+
+    /// The given worker has popped a job from its local deque, and
+    /// the job was the RHS of the `join` we were blocked on.
+    ///
+    /// Identical to `JobPopped` but for debugging.
+    JobPoppedRhs { worker: usize },
+
+    /// The given worker has stolen a job from the deque of another.
+    JobStolen { worker: usize, victim: usize },
+
+    /// N jobs were injected into the global queue.
+    JobsInjected { count: usize },
+
+    /// A job was removed from the global queue.
+    JobUninjected { worker: usize },
+
+    /// A job was "announced", but no threads were sleepy.
+    ///
+    /// No effect on thread state, just a debugging event.
     JobAnnounceEq {
         worker: usize,
         jobs_counter: u32,
     },
+
+    /// A job was "announced", and threads were sleepy. We equalized
+    /// the counters.
+    ///
+    /// No effect on thread state, just a debugging event.
     JobAnnounceBump {
         worker: usize,
         jobs_counter: u32,
         sleepy_counter: u32,
     },
-    GetSleepy {
+
+    /// When announcing a job, this was the value of the counters we observed.
+    ///
+    /// No effect on thread state, just a debugging event.
+    JobThreadCounts {
         worker: usize,
-        latch_addr: usize,
+        num_awake_but_idle: u32,
+        num_sleepers: u32,
     },
-    GotSleepy {
-        worker: usize,
-        latch_addr: usize,
-    },
-    GotAwoken {
-        worker: usize,
-        latch_addr: usize,
-    },
-    FellAsleep {
-        worker: usize,
-        latch_addr: usize,
-    },
-    GotInterruptedByLatch {
-        worker: usize,
-        latch_addr: usize,
-    },
-    GotInterruptedByInjectedJob {
-        worker: usize,
-    },
-    FoundWork {
-        worker: usize,
-        yields: u32,
-    },
-    DidNotFindWork {
-        worker: usize,
-        yields: u32,
-    },
-    StoleWork {
-        worker: usize,
-        victim: usize,
-    },
-    UninjectedWork {
-        worker: usize,
-    },
-    WaitUntil {
-        worker: usize,
-    },
-    SawLatchSet {
-        worker: usize,
-        latch_addr: usize,
-    },
-    InjectJobs {
-        count: usize,
-    },
-    Join {
-        worker: usize,
-    },
-    PoppedJob {
-        worker: usize,
-    },
-    PoppedRhs {
-        worker: usize,
-    },
-    LostJob {
-        worker: usize,
-    },
+
+    /// Indicates that a job completed "ok" as part of a scope.
     JobCompletedOk {
         owner_thread: usize,
     },
+
+    /// Indicates that a job panicked as part of a scope, and the
+    /// error was stored for later.
+    ///
+    /// Useful for debugging.
     JobPanickedErrorStored {
         owner_thread: usize,
     },
+
+    /// Indicates that a job panicked as part of a scope, and the
+    /// error was discarded.
+    ///
+    /// Useful for debugging.
     JobPanickedErrorNotStored {
         owner_thread: usize,
     },
+
+    /// Indicates that a scope completed with a panic.
+    ///
+    /// Useful for debugging.
     ScopeCompletePanicked {
         owner_thread: usize,
     },
+
+    /// Indicates that a scope completed with a panic.
+    ///
+    /// Useful for debugging.
     ScopeCompleteNoPanic {
         owner_thread: usize,
     },
-    TerminateLatch {
-        worker: usize,
-        latch_addr: usize,
-    },
+}
+
+struct StampedEvent {
+    time_stamp: u64,
+    event: Event,
 }
 
 /// Handle to the logging thread, if any. You can use this to deliver
@@ -140,7 +165,7 @@ pub(super) struct Logger {
 
 impl Logger {
     pub(super) fn new() -> Logger {
-        if !LOGS_COMPILED_IN {
+        if !LOG_ENABLED {
             return Self::disabled();
         }
 
@@ -161,7 +186,7 @@ impl Logger {
 
     #[inline]
     pub(super) fn log(&self, event: impl FnOnce() -> Event) {
-        if !LOGS_COMPILED_IN {
+        if !LOG_ENABLED {
             return;
         }
 
@@ -178,10 +203,48 @@ impl Logger {
             panic!("failed to open `{}`: {}", log_filename, err)
         });
 
+        const CAPACITY: usize = 1000;
         let mut writer = BufWriter::new(file);
-        for event in receiver {
-            write!(writer, "{:?}\n", event).unwrap();
-            writer.flush().unwrap();
+        let mut events = Vec::with_capacity(CAPACITY);
+        let mut incoming = receiver.into_iter();
+
+        loop {
+            while let Some(event) = incoming.next() {
+                match event {
+                    Event::Flush => break,
+                    _ => events.push(event),
+                }
+
+                if events.len() == CAPACITY {
+                    break;
+                }
+            }
+
+            for event in events.drain(..) {
+                write!(writer, "{:?}\n", event).unwrap();
+                writer.flush().unwrap();
+            }
+        }
+    }
+}
+
+enum State {
+    WORKING,
+    IDLE,
+    SLEEPING,
+}
+
+struct SimulatorState {
+    num_workers: usize,
+    local_queue_size: Vec<usize>,
+    thread_states: Vec<State>,
+    injector_size: usize,
+}
+
+impl SimulatorState {
+    fn simulate(&mut self, event: &Event) {
+        match event {
+            _ => { }
         }
     }
 }

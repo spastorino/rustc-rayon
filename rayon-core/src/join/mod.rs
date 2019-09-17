@@ -131,8 +131,6 @@ where
     }
 
     registry::in_worker(|worker_thread, injected| unsafe {
-        worker_thread.log(|| Join { worker: worker_thread.index() });
-
         // Create virtual wrapper for task b; this all has to be
         // done here so that the stack frame can keep it all live
         // long enough.
@@ -158,13 +156,13 @@ where
                     // Found it! Let's run it.
                     //
                     // Note that this could panic, but it's ok if we unwind here.
-                    worker_thread.log(|| PoppedRhs {
+                    worker_thread.log(|| JobPoppedRhs {
                         worker: worker_thread.index()
                     });
                     let result_b = job_b.run_inline(injected);
                     return (result_a, result_b);
                 } else {
-                    worker_thread.log(|| PoppedJob {
+                    worker_thread.log(|| JobPopped {
                         worker: worker_thread.index()
                     });
                     worker_thread.execute(job);
@@ -172,9 +170,6 @@ where
             } else {
                 // Local deque is empty. Time to steal from other
                 // threads.
-                worker_thread.log(|| LostJob {
-                    worker: worker_thread.index()
-                });
                 worker_thread.wait_until(&job_b.latch);
                 debug_assert!(job_b.latch.probe());
                 break;

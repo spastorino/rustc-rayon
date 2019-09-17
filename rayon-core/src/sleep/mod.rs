@@ -152,13 +152,13 @@ impl Sleep {
             let (_, sleepy_counter) = Self::split_j_s_counters(counters);
             if sleepy_counter.0 == std::u32::MAX {
                 if self.j_s_counters.compare_exchange(counters, 0, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                    self.logger.log(|| AnnouncedSleepy { worker: worker_index, sleepy_counter: 0 });
+                    self.logger.log(|| ThreadSleepy { worker: worker_index, sleepy_counter: 0 });
                     return SleepyCounter(0);
                 }
             } else {
                 let counters1 = Self::increment_sleepy_counter(counters);
                 if self.j_s_counters.compare_exchange(counters, counters1, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                    self.logger.log(|| AnnouncedSleepy { worker: worker_index, sleepy_counter: sleepy_counter.0 });
+                    self.logger.log(|| ThreadSleepy { worker: worker_index, sleepy_counter: sleepy_counter.0 });
                     return sleepy_counter;
                 }
             }
@@ -217,10 +217,13 @@ impl Sleep {
     }
 
     #[inline]
-    pub(super) fn start_looking(&self, worker_index: usize) -> IdleState {
+    pub(super) fn start_looking(&self, worker_index: usize, latch: &CoreLatch) -> IdleState {
         self.add_idle_thread();
 
-        self.logger.log(|| GotIdle { worker: worker_index, });
+        self.logger.log(|| ThreadIdle {
+            worker: worker_index,
+            latch_addr: latch.addr(),
+        });
 
         IdleState {
             worker_index,
@@ -231,7 +234,7 @@ impl Sleep {
 
     #[inline]
     pub(super) fn work_found(&self, idle_state: IdleState) {
-        self.logger.log(|| FoundWork {
+        self.logger.log(|| ThreadFoundWork {
             worker: idle_state.worker_index,
             yields: idle_state.rounds,
         });
@@ -248,7 +251,7 @@ impl Sleep {
         idle_state: &mut IdleState,
         latch: &CoreLatch,
     ) {
-        self.logger.log(|| DidNotFindWork {
+        self.logger.log(|| ThreadNoWork {
             worker: idle_state.worker_index,
             yields: idle_state.rounds,
         });
@@ -272,13 +275,8 @@ impl Sleep {
     fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch) {
         let worker_index = idle_state.worker_index;
 
-        self.logger.log(|| GetSleepy {
-            worker: worker_index,
-            latch_addr: latch.addr(),
-        });
-
         if !latch.get_sleepy() {
-            self.logger.log(|| GotInterruptedByLatch {
+            self.logger.log(|| ThreadSleepInterruptedByLatch {
                 worker: worker_index,
                 latch_addr: latch.addr(),
             });
@@ -286,17 +284,12 @@ impl Sleep {
             return;
         }
 
-        self.logger.log(|| GotSleepy {
-            worker: worker_index,
-            latch_addr: latch.addr(),
-        });
-
         let sleep_state = &self.worker_sleep_states[worker_index];
         let mut is_asleep = sleep_state.is_asleep.lock().unwrap();
         debug_assert!(!*is_asleep);
 
         if !latch.fall_asleep() {
-            self.logger.log(|| GotInterruptedByLatch {
+            self.logger.log(|| ThreadSleepInterruptedByLatch {
                 worker: worker_index,
                 latch_addr: latch.addr(),
             });
@@ -311,7 +304,7 @@ impl Sleep {
         // problem for us, we'll just loop around and maybe get
         // sleepy again.
 
-        self.logger.log(|| FellAsleep {
+        self.logger.log(|| ThreadSleeping {
             worker: worker_index,
             latch_addr: latch.addr(),
         });
@@ -335,7 +328,7 @@ impl Sleep {
             idle_state.rounds = 0;
             idle_state.sleepy_counter = INVALID_SLEEPY_COUNTER;
         } else {
-            self.logger.log(|| GotInterruptedByInjectedJob {
+            self.logger.log(|| ThreadSleepInterruptedByJob {
                 worker: worker_index,
             });
 
@@ -349,7 +342,7 @@ impl Sleep {
         // gate other reads on this value.
         self.sub_sleeping_thread();
 
-        self.logger.log(|| GotAwoken {
+        self.logger.log(|| ThreadAwoken {
             worker: worker_index,
             latch_addr: latch.addr(),
         });
@@ -357,21 +350,13 @@ impl Sleep {
         latch.wake_up();
     }
 
-    /// A "tickle" is used to indicate that an event of interest has
-    /// occurred.
-    ///
-    /// The `source_worker_index` is the thread index that caused the
-    /// event, or `std::usize::MAX` if that is not readily
-    /// identified. This is used only for logging.
-    ///
-    /// The `target_worker_index` is the thread index to awaken, or
-    /// `std::usize::MAX` if the event is not targeting any specific
-    /// thread. This is used (e.g.) when a latch is set, to awaken
-    /// just the thread that was blocking on the latch.
-    pub(super) fn tickle_one(&self, source_worker_index: usize, target_worker_index: usize) {
-        self.logger.log(|| TickleOne {
-            source_worker: source_worker_index,
-            target_worker: target_worker_index,
+    /// Notify the given thread that it should wake up (if it is
+    /// sleeping).  When this method is invoked, we typically know the
+    /// thread is asleep, though in rare cases it could have been
+    /// awoken by (e.g.) new work having been posted.
+    pub(super) fn notify_worker_latch_is_set(&self, target_worker_index: usize) {
+        self.logger.log(|| ThreadNotifyLatch {
+            worker: target_worker_index,
         });
 
         // We need to acquire the worker's lock and check whether they
@@ -436,11 +421,6 @@ impl Sleep {
         source_worker_index: usize,
         num_jobs: u32,
     ) {
-        self.logger.log(|| TickleAny {
-            source_worker: source_worker_index,
-            num_jobs: num_jobs,
-        });
-
         self.announce_job(source_worker_index);
 
         // We can use relaxed here. Reasoning:
@@ -454,9 +434,8 @@ impl Sleep {
         //   including the "sleeping thread" count increment.
         let (num_awake_but_idle, num_sleepers) = self.load_thread_counts(Ordering::Relaxed);
 
-        self.logger.log(|| TickleAnyThreadCounts {
-            source_worker: source_worker_index,
-            num_jobs: num_jobs,
+        self.logger.log(|| JobThreadCounts {
+            worker: source_worker_index,
             num_awake_but_idle: num_awake_but_idle,
             num_sleepers: num_sleepers,
         });
@@ -486,7 +465,7 @@ impl Sleep {
             let is_asleep = sleep_state.is_asleep.lock().unwrap();
             if *is_asleep {
                 sleep_state.condvar.notify_one();
-                self.logger.log(|| TickleAnyWakeThread {
+                self.logger.log(|| ThreadNotifyJob {
                     source_worker: source_worker_index,
                     target_worker: i,
                 });

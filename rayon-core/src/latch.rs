@@ -160,7 +160,7 @@ impl<'r> Latch for SpinLatch<'r> {
     #[inline]
     fn set(&self) {
         if self.core_latch.set() {
-            self.registry.tickle_worker(self.target_worker_index);
+            self.registry.notify_worker_latch_is_set(self.target_worker_index);
         }
     }
 }
@@ -262,12 +262,10 @@ impl CountLatch {
     /// Decrements the latch counter by one and possibly set it.  If
     /// the latch is set, then the specific worker thread is tickled,
     /// which should be the one that owns this latch.
-    ///
-    /// FIXME: currently, we just tickle all threads.
     #[inline]
     pub(super) fn set_and_tickle_one(&self, registry: &Registry, target_worker_index: usize) {
         if self.set() {
-            registry.tickle_worker(target_worker_index);
+            registry.notify_worker_latch_is_set(target_worker_index);
         }
     }
 }
