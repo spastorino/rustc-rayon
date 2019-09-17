@@ -270,18 +270,17 @@ impl Sleep {
 
     #[cold]
     fn sleep(&self, idle_state: &mut IdleState, latch: &CoreLatch) {
-        let latch_addr = latch as *const CoreLatch as usize;
         let worker_index = idle_state.worker_index;
 
         self.logger.log(|| GetSleepy {
             worker: worker_index,
-            latch_addr: latch_addr,
+            latch_addr: latch.addr(),
         });
 
         if !latch.get_sleepy() {
             self.logger.log(|| GotInterruptedByLatch {
                 worker: worker_index,
-                latch_addr: latch_addr,
+                latch_addr: latch.addr(),
             });
 
             return;
@@ -289,7 +288,7 @@ impl Sleep {
 
         self.logger.log(|| GotSleepy {
             worker: worker_index,
-            latch_addr: latch_addr,
+            latch_addr: latch.addr(),
         });
 
         let sleep_state = &self.worker_sleep_states[worker_index];
@@ -299,7 +298,7 @@ impl Sleep {
         if !latch.fall_asleep() {
             self.logger.log(|| GotInterruptedByLatch {
                 worker: worker_index,
-                latch_addr: latch_addr,
+                latch_addr: latch.addr(),
             });
 
             return;
@@ -314,7 +313,7 @@ impl Sleep {
 
         self.logger.log(|| FellAsleep {
             worker: worker_index,
-            latch_addr: latch_addr,
+            latch_addr: latch.addr(),
         });
 
         // Increase the count of the number of sleepers.
@@ -352,7 +351,7 @@ impl Sleep {
 
         self.logger.log(|| GotAwoken {
             worker: worker_index,
-            latch_addr,
+            latch_addr: latch.addr(),
         });
 
         latch.wake_up();
