@@ -10,12 +10,12 @@
 use crossbeam_channel::{self, Sender, Receiver};
 use std::env;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 
 /// True if logs are compiled in.
 pub(super) const LOG_ENABLED: bool = cfg!(rayon_rs_log);
 
-#[derive(Debug)]
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub(super) enum Event {
     /// Flushes events to disk, used to terminate benchmarking.
     Flush,
@@ -151,6 +151,7 @@ pub(super) enum Event {
     },
 }
 
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
 struct StampedEvent {
     time_stamp: u64,
     event: Event,
@@ -160,11 +161,11 @@ struct StampedEvent {
 /// logs. You can also clone it freely.
 #[derive(Clone)]
 pub(super) struct Logger {
-    sender: Option<Sender<Event>>,
+    sender: Option<Sender<StampedEvent>>,
 }
 
 impl Logger {
-    pub(super) fn new() -> Logger {
+    pub(super) fn new(num_workers: usize) -> Logger {
         if !LOG_ENABLED {
             return Self::disabled();
         }
@@ -175,7 +176,7 @@ impl Logger {
         };
 
         let (sender, receiver) = crossbeam_channel::unbounded();
-        ::std::thread::spawn(move || Self::logger_thread(env_log, receiver));
+        ::std::thread::spawn(move || Self::logger_thread(num_workers, env_log, receiver));
 
         return Logger { sender: Some(sender) };
     }
@@ -191,13 +192,15 @@ impl Logger {
         }
 
         if let Some(sender) = &self.sender {
-            sender.send(event()).unwrap();
+            let time_stamp = unsafe { x86::time::rdtscp() };
+            sender.send(StampedEvent { time_stamp, event: event() }).unwrap();
         }
     }
 
     fn logger_thread(
+        num_workers: usize,
         log_filename: String,
-        receiver: Receiver<Event>,
+        receiver: Receiver<StampedEvent>,
     ) {
         let file = File::create(&log_filename).unwrap_or_else(|err| {
             panic!("failed to open `{}`: {}", log_filename, err)
@@ -207,12 +210,13 @@ impl Logger {
         let mut writer = BufWriter::new(file);
         let mut events = Vec::with_capacity(CAPACITY);
         let mut incoming = receiver.into_iter();
+        let mut state = SimulatorState::new(num_workers);
 
         loop {
-            while let Some(event) = incoming.next() {
-                match event {
+            while let Some(stamped_event) = incoming.next() {
+                match stamped_event.event {
                     Event::Flush => break,
-                    _ => events.push(event),
+                    _ => events.push(stamped_event),
                 }
 
                 if events.len() == CAPACITY {
@@ -220,31 +224,144 @@ impl Logger {
                 }
             }
 
-            for event in events.drain(..) {
-                write!(writer, "{:?}\n", event).unwrap();
-                writer.flush().unwrap();
+            events.sort();
+
+            for stamped_event in events.drain(..) {
+                if state.simulate(&stamped_event.event) {
+                    state.dump(&mut writer, &stamped_event).unwrap();
+                }
             }
+
+            writer.flush().unwrap();
         }
     }
 }
 
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
 enum State {
-    WORKING,
-    IDLE,
-    SLEEPING,
+    Working,
+    Idle,
+    Sleeping,
+}
+
+impl State {
+    fn letter(&self) -> char {
+        match self {
+            State::Working => 'W',
+            State::Idle => 'I',
+            State::Sleeping => 'S',
+        }
+    }
 }
 
 struct SimulatorState {
-    num_workers: usize,
     local_queue_size: Vec<usize>,
     thread_states: Vec<State>,
     injector_size: usize,
 }
 
 impl SimulatorState {
-    fn simulate(&mut self, event: &Event) {
-        match event {
-            _ => { }
+    fn new(num_workers: usize) -> Self {
+        Self {
+            local_queue_size: (0..num_workers).map(|_| 0).collect(),
+            thread_states: (0..num_workers).map(|_| State::Working).collect(),
+            injector_size: 0,
         }
+    }
+
+    fn simulate(&mut self, event: &Event) -> bool {
+        match *event {
+            Event::ThreadIdle { worker, .. } => {
+                self.thread_states[worker] = State::Idle;
+                true
+            }
+
+            Event::ThreadStart { worker, .. } |
+            Event::ThreadFoundWork { worker, .. } => {
+                self.thread_states[worker] = State::Working;
+                true
+            }
+
+            Event::ThreadSleeping { worker, .. } => {
+                self.thread_states[worker] = State::Sleeping;
+                true
+            }
+
+            Event::ThreadAwoken { worker, .. } => {
+                self.thread_states[worker] = State::Idle;
+                true
+            }
+
+            Event::JobPushed { worker } => {
+                self.local_queue_size[worker] += 1;
+                true
+            }
+
+            Event::JobPopped { worker } | Event::JobPoppedRhs { worker } => {
+                self.local_queue_size[worker] -= 1;
+                true
+            }
+
+            Event::JobStolen { victim, .. } => {
+                self.local_queue_size[victim] -= 1;
+                true
+            }
+
+            Event::JobsInjected { count } => {
+                self.injector_size += count;
+                true
+            }
+
+            Event::JobUninjected { .. } => {
+                self.injector_size -= 1;
+                true
+            }
+
+            Event::ThreadNotifyJob { .. } => true, // XXX
+
+            // remaining events are no-ops from pov of simulating the
+            // thread state
+            _ => false
+        }
+    }
+
+    fn dump(&mut self, w: &mut impl Write, event: &StampedEvent) -> io::Result<()> {
+        let num_idle_threads = self.thread_states.iter()
+            .filter(|s| **s == State::Idle)
+            .count();
+
+        let num_sleeping_threads = self.thread_states.iter()
+            .filter(|s| **s == State::Sleeping)
+            .count();
+
+        let num_pending_jobs: usize = self.local_queue_size.iter()
+            .sum();
+
+        write!(w, "{:20},", event.time_stamp)?;
+        write!(w, "{:2},", num_idle_threads)?;
+        write!(w, "{:2},", num_sleeping_threads)?;
+        write!(w, "{:4},", num_pending_jobs)?;
+        write!(w, "{:4},", self.injector_size)?;
+
+        let event_str = format!("{:?}", event.event);
+        write!(w, r#""{:60}","#, event_str)?;
+
+        for ((i, state), queue_size) in (0..).zip(&self.thread_states).zip(&self.local_queue_size) {
+            write!(
+                w,
+                " T{:02},{}",
+                i,
+                state.letter(),
+            )?;
+
+            if *queue_size > 0 {
+                write!(w, ",{:03},", queue_size)?;
+            } else {
+                write!(w, ",   ,")?;
+            }
+        }
+
+        write!(w, "\n")?;
+        Ok(())
     }
 }

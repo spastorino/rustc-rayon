@@ -237,7 +237,7 @@ impl Registry {
             })
             .unzip();
 
-        let logger = Logger::new();
+        let logger = Logger::new(n_threads);
         let registry = Arc::new(Registry {
             logger: logger.clone(),
             thread_infos: stealers.into_iter().map(ThreadInfo::new).collect(),
