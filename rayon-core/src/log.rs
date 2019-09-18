@@ -237,6 +237,7 @@ impl Logger {
 enum State {
     Working,
     Idle,
+    Notified,
     Sleeping,
 }
 
@@ -245,6 +246,7 @@ impl State {
         match self {
             State::Working => 'W',
             State::Idle => 'I',
+            State::Notified => 'N',
             State::Sleeping => 'S',
         }
     }
@@ -268,6 +270,7 @@ impl SimulatorState {
     fn simulate(&mut self, event: &Event) -> bool {
         match *event {
             Event::ThreadIdle { worker, .. } => {
+                assert_eq!(self.thread_states[worker], State::Working);
                 self.thread_states[worker] = State::Idle;
                 true
             }
@@ -279,11 +282,13 @@ impl SimulatorState {
             }
 
             Event::ThreadSleeping { worker, .. } => {
+                assert_eq!(self.thread_states[worker], State::Idle);
                 self.thread_states[worker] = State::Sleeping;
                 true
             }
 
             Event::ThreadAwoken { worker, .. } => {
+                assert_eq!(self.thread_states[worker], State::Notified);
                 self.thread_states[worker] = State::Idle;
                 true
             }
@@ -313,7 +318,14 @@ impl SimulatorState {
                 true
             }
 
-            Event::ThreadNotify { .. } => true, // XXX
+            Event::ThreadNotify { worker } => {
+                // Currently, this log event occurs while holding the
+                // thread lock, so we should *always* see it before
+                // the worker awakens.
+                assert_eq!(self.thread_states[worker], State::Sleeping);
+                self.thread_states[worker] = State::Notified;
+                true
+            }
 
             // remaining events are no-ops from pov of simulating the
             // thread state
@@ -330,12 +342,17 @@ impl SimulatorState {
             .filter(|s| **s == State::Sleeping)
             .count();
 
+        let num_notified_threads = self.thread_states.iter()
+            .filter(|s| **s == State::Notified)
+            .count();
+
         let num_pending_jobs: usize = self.local_queue_size.iter()
             .sum();
 
         write!(w, "{:20},", event.time_stamp)?;
         write!(w, "{:2},", num_idle_threads)?;
         write!(w, "{:2},", num_sleeping_threads)?;
+        write!(w, "{:2},", num_notified_threads)?;
         write!(w, "{:4},", num_pending_jobs)?;
         write!(w, "{:4},", self.injector_size)?;
 
