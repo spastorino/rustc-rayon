@@ -56,7 +56,10 @@ pub(super) struct IdleState {
 /// The "sleep state" for an individual worker.
 #[derive(Default)]
 struct WorkerSleepState {
-    is_asleep: Mutex<bool>,
+    /// Set to true when the worker goes to sleep; set to false when
+    /// the worker is notified or when it wakes.
+    is_blocked: Mutex<bool>,
+
     condvar: Condvar,
 }
 
@@ -285,8 +288,8 @@ impl Sleep {
         }
 
         let sleep_state = &self.worker_sleep_states[worker_index];
-        let mut is_asleep = sleep_state.is_asleep.lock().unwrap();
-        debug_assert!(!*is_asleep);
+        let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
+        debug_assert!(!*is_blocked);
 
         if !latch.fall_asleep() {
             self.logger.log(|| ThreadSleepInterruptedByLatch {
@@ -318,12 +321,12 @@ impl Sleep {
         // we add a sleeping thread.
         if self.check_still_sleepy(idle_state.sleepy_counter) {
             // Flag ourselves as asleep.
-            *is_asleep = true;
+            *is_blocked = true;
 
-            is_asleep = sleep_state.condvar.wait(is_asleep).unwrap();
+            is_blocked = sleep_state.condvar.wait(is_blocked).unwrap();
 
             // Flag ourselves as awake.
-            *is_asleep = false;
+            *is_blocked = false;
 
             idle_state.rounds = 0;
             idle_state.sleepy_counter = INVALID_SLEEPY_COUNTER;
@@ -362,9 +365,10 @@ impl Sleep {
         // We need to acquire the worker's lock and check whether they
         // are sleeping.
         let sleep_state = &self.worker_sleep_states[target_worker_index];
-        let is_asleep = sleep_state.is_asleep.lock().unwrap();
-        if *is_asleep {
+        let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
+        if *is_blocked {
             sleep_state.condvar.notify_one();
+            *is_blocked = false;
         }
     }
 
@@ -462,9 +466,11 @@ impl Sleep {
         mut num_to_wake: u32,
     ) {
         for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
-            let is_asleep = sleep_state.is_asleep.lock().unwrap();
-            if *is_asleep {
+            let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
+            if *is_blocked {
                 sleep_state.condvar.notify_one();
+                *is_blocked = false;
+
                 self.logger.log(|| ThreadNotifyJob {
                     source_worker: source_worker_index,
                     target_worker: i,
