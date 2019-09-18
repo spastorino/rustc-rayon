@@ -335,13 +335,13 @@ impl Sleep {
 
             idle_state.rounds = ROUNDS_UNTIL_SLEEPING;
             idle_state.sleepy_counter = INVALID_SLEEPY_COUNTER;
-        }
 
-        // Decrease number of sleepers.
-        //
-        // Relaxed ordering suffices here because in no case do we
-        // gate other reads on this value.
-        self.sub_sleeping_thread();
+            // Decrease number of sleepers.
+            //
+            // Relaxed ordering suffices here because in no case do we
+            // gate other reads on this value.
+            self.sub_sleeping_thread();
+        }
 
         self.logger.log(|| ThreadAwoken {
             worker: worker_index,
@@ -472,6 +472,12 @@ impl Sleep {
         if *is_blocked {
             *is_blocked = false;
             sleep_state.condvar.notify_one();
+
+            // Decrease number of sleepers.
+            //
+            // Relaxed ordering suffices here because in no case do we
+            // gate other reads on this value.
+            self.sub_sleeping_thread();
 
             self.logger.log(|| ThreadNotify {
                 worker: index,
