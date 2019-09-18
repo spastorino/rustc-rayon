@@ -390,8 +390,9 @@ impl Sleep {
         &self,
         source_worker_index: usize,
         num_jobs: u32,
+        queue_was_empty: bool,
     ) {
-        self.new_jobs(source_worker_index, num_jobs)
+        self.new_jobs(source_worker_index, num_jobs, queue_was_empty)
     }
 
     /// Signals that `num_jobs` new jobs were pushed onto a thread's
@@ -414,8 +415,9 @@ impl Sleep {
         &self,
         source_worker_index: usize,
         num_jobs: u32,
+        queue_was_empty: bool,
     ) {
-        self.new_jobs(source_worker_index, num_jobs)
+        self.new_jobs(source_worker_index, num_jobs, queue_was_empty)
     }
 
     /// Common helper for `new_injected_jobs` and `new_internal_jobs`.
@@ -424,6 +426,7 @@ impl Sleep {
         &self,
         source_worker_index: usize,
         num_jobs: u32,
+        queue_was_empty: bool,
     ) {
         self.announce_job(source_worker_index);
 
@@ -449,9 +452,10 @@ impl Sleep {
             return;
         }
 
-        if num_awake_but_idle >= num_jobs {
-            // still have idle threads looking for work, don't go
-            // waking up new ones
+        // If the queue is non-empty, then we always wake up a worker
+        // -- clearly the existing idle jobs aren't enough. Otherwise,
+        // check to see if we have enough idle workers.
+        if queue_was_empty && num_awake_but_idle >= num_jobs {
             return;
         }
 
