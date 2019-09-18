@@ -244,7 +244,7 @@ impl Sleep {
         if self.sub_idle_thread() {
             // If we were the last idle thread and other threads are still sleeping,
             // then we should wake up another thread.
-            self.wake_threads(idle_state.worker_index, 1);
+            self.wake_any_threads(1);
         }
     }
 
@@ -320,13 +320,11 @@ impl Sleep {
         // We need to do this check that we are still sleepy *after*
         // we add a sleeping thread.
         if self.check_still_sleepy(idle_state.sleepy_counter) {
-            // Flag ourselves as asleep.
+            // Flag ourselves as asleep and wait till we are notified.
             *is_blocked = true;
-
-            is_blocked = sleep_state.condvar.wait(is_blocked).unwrap();
-
-            // Flag ourselves as awake.
-            *is_blocked = false;
+            while *is_blocked {
+                is_blocked = sleep_state.condvar.wait(is_blocked).unwrap();
+            }
 
             idle_state.rounds = 0;
             idle_state.sleepy_counter = INVALID_SLEEPY_COUNTER;
@@ -358,18 +356,7 @@ impl Sleep {
     /// thread is asleep, though in rare cases it could have been
     /// awoken by (e.g.) new work having been posted.
     pub(super) fn notify_worker_latch_is_set(&self, target_worker_index: usize) {
-        self.logger.log(|| ThreadNotifyLatch {
-            worker: target_worker_index,
-        });
-
-        // We need to acquire the worker's lock and check whether they
-        // are sleeping.
-        let sleep_state = &self.worker_sleep_states[target_worker_index];
-        let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
-        if *is_blocked {
-            sleep_state.condvar.notify_one();
-            *is_blocked = false;
-        }
+        self.wake_specific_thread(target_worker_index);
     }
 
 
@@ -460,31 +447,39 @@ impl Sleep {
         }
 
         let num_to_wake = std::cmp::min(num_jobs - num_awake_but_idle, num_sleepers);
-        self.wake_threads(source_worker_index, num_to_wake);
+        self.wake_any_threads(num_to_wake);
     }
 
     #[cold]
-    fn wake_threads(
+    fn wake_any_threads(
         &self,
-        source_worker_index: usize,
         mut num_to_wake: u32,
     ) {
-        for (i, sleep_state) in self.worker_sleep_states.iter().enumerate() {
-            let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
-            if *is_blocked {
-                sleep_state.condvar.notify_one();
-                *is_blocked = false;
-
-                self.logger.log(|| ThreadNotifyJob {
-                    source_worker: source_worker_index,
-                    target_worker: i,
-                });
-
+        for i in 0..self.worker_sleep_states.len() {
+            if self.wake_specific_thread(i) {
                 num_to_wake -= 1;
                 if num_to_wake == 0 {
                     return;
                 }
             }
+        }
+    }
+
+    fn wake_specific_thread(&self, index: usize) -> bool {
+        let sleep_state = &self.worker_sleep_states[index];
+
+        let mut is_blocked = sleep_state.is_blocked.lock().unwrap();
+        if *is_blocked {
+            *is_blocked = false;
+            sleep_state.condvar.notify_one();
+
+            self.logger.log(|| ThreadNotify {
+                worker: index,
+            });
+
+            true
+        } else {
+            false
         }
     }
 }

@@ -60,12 +60,8 @@ pub(super) enum Event {
     ThreadAwoken { worker: usize, latch_addr: usize },
 
     /// Indicates that the given worker thread was notified it should
-    /// awaken because its latch was set.
-    ThreadNotifyLatch { worker: usize },
-
-    /// Indicates that the given worker thread was notified it should
-    /// awake because new work may be available.
-    ThreadNotifyJob { source_worker: usize, target_worker: usize },
+    /// awaken.
+    ThreadNotify { worker: usize },
 
     /// The given worker has pushed a job to its local deque.
     JobPushed { worker: usize },
@@ -317,7 +313,7 @@ impl SimulatorState {
                 true
             }
 
-            Event::ThreadNotifyJob { .. } => true, // XXX
+            Event::ThreadNotify { .. } => true, // XXX
 
             // remaining events are no-ops from pov of simulating the
             // thread state
