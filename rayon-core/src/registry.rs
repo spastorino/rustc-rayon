@@ -865,6 +865,10 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
     // Normal termination, do not abort.
     mem::forget(abort_guard);
 
+    worker_thread.log(|| ThreadTerminate {
+        worker: index,
+    });
+
     // Inform a user callback that we exited a thread.
     if let Some(ref handler) = registry.exit_handler {
         let registry = registry.clone();

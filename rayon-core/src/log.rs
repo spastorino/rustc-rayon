@@ -7,13 +7,14 @@
 //! Note that logs are an internally debugging tool and their format
 //! is considered unstable, as are the details of how to enable them.
 
-use crossbeam_channel::{self, Sender, Receiver};
+use crossbeam_channel::{self, Receiver, Sender};
+use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 
 /// True if logs are compiled in.
-pub(super) const LOG_ENABLED: bool = cfg!(rayon_rs_log);
+pub(super) const LOG_ENABLED: bool = cfg!(any(rayon_rs_log, debug_assertions));
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub(super) enum Event {
@@ -21,7 +22,15 @@ pub(super) enum Event {
     Flush,
 
     /// Indicates that a worker thread started execution.
-    ThreadStart { worker: usize, terminate_addr: usize },
+    ThreadStart {
+        worker: usize,
+        terminate_addr: usize,
+    },
+
+    /// Indicates that a worker thread started execution.
+    ThreadTerminate {
+        worker: usize,
+    },
 
     /// Indicates that a worker thread became idle, blocked on `latch_addr`.
     ThreadIdle { worker: usize, latch_addr: usize },
@@ -94,39 +103,29 @@ pub(super) enum Event {
     },
 
     /// Indicates that a job completed "ok" as part of a scope.
-    JobCompletedOk {
-        owner_thread: usize,
-    },
+    JobCompletedOk { owner_thread: usize },
 
     /// Indicates that a job panicked as part of a scope, and the
     /// error was stored for later.
     ///
     /// Useful for debugging.
-    JobPanickedErrorStored {
-        owner_thread: usize,
-    },
+    JobPanickedErrorStored { owner_thread: usize },
 
     /// Indicates that a job panicked as part of a scope, and the
     /// error was discarded.
     ///
     /// Useful for debugging.
-    JobPanickedErrorNotStored {
-        owner_thread: usize,
-    },
+    JobPanickedErrorNotStored { owner_thread: usize },
 
     /// Indicates that a scope completed with a panic.
     ///
     /// Useful for debugging.
-    ScopeCompletePanicked {
-        owner_thread: usize,
-    },
+    ScopeCompletePanicked { owner_thread: usize },
 
     /// Indicates that a scope completed with a panic.
     ///
     /// Useful for debugging.
-    ScopeCompleteNoPanic {
-        owner_thread: usize,
-    },
+    ScopeCompleteNoPanic { owner_thread: usize },
 }
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
@@ -148,15 +147,39 @@ impl Logger {
             return Self::disabled();
         }
 
+        // format:
+        //
+        // tail:<file> -- dumps the last 10,000 events
+        // profile:<file> -- dumps every Nth event
+        // all:<file> -- dumps every event to the file
         let env_log = match env::var("RAYON_RS_LOG") {
             Ok(s) => s,
             Err(_) => return Self::disabled(),
         };
 
         let (sender, receiver) = crossbeam_channel::unbounded();
-        ::std::thread::spawn(move || Self::logger_thread(num_workers, env_log, receiver));
 
-        return Logger { sender: Some(sender) };
+        if env_log.starts_with("tail:") {
+            let filename = env_log["tail:".len()..].to_string();
+            ::std::thread::spawn(move || {
+                Self::tail_logger_thread(num_workers, filename, 10_000, receiver)
+            });
+        } else if env_log == "all" {
+            ::std::thread::spawn(move || {
+                Self::all_logger_thread(num_workers, receiver)
+            });
+        } else if env_log.starts_with("profile:") {
+            let filename = env_log["profile:".len()..].to_string();
+            ::std::thread::spawn(move || {
+                Self::profile_logger_thread(num_workers, filename, 10_000, receiver)
+            });
+        } else {
+            panic!("RAYON_RS_LOG should be 'tail:<file>' or 'profile:<file>'");
+        }
+
+        return Logger {
+            sender: Some(sender),
+        };
     }
 
     fn disabled() -> Logger {
@@ -171,33 +194,44 @@ impl Logger {
 
         if let Some(sender) = &self.sender {
             let time_stamp = unsafe { x86::time::rdtscp() };
-            sender.send(StampedEvent { time_stamp, event: event() }).unwrap();
+            sender
+                .send(StampedEvent {
+                    time_stamp,
+                    event: event(),
+                })
+                .unwrap();
         }
     }
 
-    fn logger_thread(
+    fn profile_logger_thread(
         num_workers: usize,
         log_filename: String,
+        capacity: usize,
         receiver: Receiver<StampedEvent>,
     ) {
-        let file = File::create(&log_filename).unwrap_or_else(|err| {
-            panic!("failed to open `{}`: {}", log_filename, err)
-        });
+        let file = File::create(&log_filename)
+            .unwrap_or_else(|err| panic!("failed to open `{}`: {}", log_filename, err));
 
-        const CAPACITY: usize = 1000;
         let mut writer = BufWriter::new(file);
-        let mut events = Vec::with_capacity(CAPACITY);
-        let mut incoming = receiver.into_iter();
+        let mut events = Vec::with_capacity(capacity);
         let mut state = SimulatorState::new(num_workers);
+        let timeout = std::time::Duration::from_secs(30);
 
         loop {
-            while let Some(stamped_event) = incoming.next() {
-                match stamped_event.event {
-                    Event::Flush => break,
-                    _ => events.push(stamped_event),
+            loop {
+                match receiver.recv_timeout(timeout) {
+                    Ok(stamped_event) => {
+                        if let Event::Flush = stamped_event.event {
+                            break;
+                        } else {
+                            events.push(stamped_event);
+                        }
+                    }
+
+                    Err(_) => break,
                 }
 
-                if events.len() == CAPACITY {
+                if events.len() == capacity {
                     break;
                 }
             }
@@ -213,6 +247,76 @@ impl Logger {
             writer.flush().unwrap();
         }
     }
+
+    fn tail_logger_thread(
+        num_workers: usize,
+        log_filename: String,
+        capacity: usize,
+        receiver: Receiver<StampedEvent>,
+    ) {
+        let file = File::create(&log_filename)
+            .unwrap_or_else(|err| panic!("failed to open `{}`: {}", log_filename, err));
+
+        let mut writer = BufWriter::new(file);
+        let mut events: VecDeque<StampedEvent> = VecDeque::with_capacity(capacity);
+        let mut state = SimulatorState::new(num_workers);
+        let timeout = std::time::Duration::from_secs(30);
+        let mut skipped = false;
+
+        loop {
+            loop {
+                match receiver.recv_timeout(timeout) {
+                    Ok(stamped_event) => {
+                        if let Event::Flush = stamped_event.event {
+                            // We ignore Flush events in tail mode --
+                            // we're really just looking for
+                            // deadlocks.
+                            continue;
+                        } else {
+                            if events.len() == capacity {
+                                let event = events.pop_front().unwrap();
+                                state.simulate(&event.event);
+                                skipped = true;
+                            }
+
+                            events.push_back(stamped_event);
+                        }
+                    }
+
+                    Err(_) => break,
+                }
+            }
+
+            if skipped {
+                write!(writer, "...\n").unwrap();
+                skipped = false;
+            }
+
+            for stamped_event in events.drain(..) {
+                // In tail mode, we dump *all* events out, whether or
+                // not they were 'interesting' to the state machine.
+                state.simulate(&stamped_event.event);
+                state.dump(&mut writer, &stamped_event).unwrap();
+            }
+
+            writer.flush().unwrap();
+        }
+    }
+
+    fn all_logger_thread(
+        num_workers: usize,
+        receiver: Receiver<StampedEvent>,
+    ) {
+        let stderr = std::io::stderr();
+        let mut state = SimulatorState::new(num_workers);
+
+        for stamped_event in receiver {
+            let mut writer = BufWriter::new(stderr.lock());
+            state.simulate(&stamped_event.event);
+            state.dump(&mut writer, &stamped_event).unwrap();
+            writer.flush().unwrap();
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
@@ -221,6 +325,7 @@ enum State {
     Idle,
     Notified,
     Sleeping,
+    Terminated,
 }
 
 impl State {
@@ -230,6 +335,7 @@ impl State {
             State::Idle => 'I',
             State::Notified => 'N',
             State::Sleeping => 'S',
+            State::Terminated => 'T',
         }
     }
 }
@@ -257,9 +363,13 @@ impl SimulatorState {
                 true
             }
 
-            Event::ThreadStart { worker, .. } |
-            Event::ThreadFoundWork { worker, .. } => {
+            Event::ThreadStart { worker, .. } | Event::ThreadFoundWork { worker, .. } => {
                 self.thread_states[worker] = State::Working;
+                true
+            }
+
+            Event::ThreadTerminate { worker, .. } => {
+                self.thread_states[worker] = State::Terminated;
                 true
             }
 
@@ -311,25 +421,30 @@ impl SimulatorState {
 
             // remaining events are no-ops from pov of simulating the
             // thread state
-            _ => false
+            _ => false,
         }
     }
 
     fn dump(&mut self, w: &mut impl Write, event: &StampedEvent) -> io::Result<()> {
-        let num_idle_threads = self.thread_states.iter()
+        let num_idle_threads = self
+            .thread_states
+            .iter()
             .filter(|s| **s == State::Idle)
             .count();
 
-        let num_sleeping_threads = self.thread_states.iter()
+        let num_sleeping_threads = self
+            .thread_states
+            .iter()
             .filter(|s| **s == State::Sleeping)
             .count();
 
-        let num_notified_threads = self.thread_states.iter()
+        let num_notified_threads = self
+            .thread_states
+            .iter()
             .filter(|s| **s == State::Notified)
             .count();
 
-        let num_pending_jobs: usize = self.local_queue_size.iter()
-            .sum();
+        let num_pending_jobs: usize = self.local_queue_size.iter().sum();
 
         write!(w, "{:20},", event.time_stamp)?;
         write!(w, "{:2},", num_idle_threads)?;
@@ -342,12 +457,7 @@ impl SimulatorState {
         write!(w, r#""{:60}","#, event_str)?;
 
         for ((i, state), queue_size) in (0..).zip(&self.thread_states).zip(&self.local_queue_size) {
-            write!(
-                w,
-                " T{:02},{}",
-                i,
-                state.letter(),
-            )?;
+            write!(w, " T{:02},{}", i, state.letter(),)?;
 
             if *queue_size > 0 {
                 write!(w, ",{:03},", queue_size)?;
