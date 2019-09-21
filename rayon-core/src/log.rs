@@ -41,7 +41,7 @@ pub(super) enum Event {
 
     /// Indicates that an idle worker is getting sleepy. `sleepy_counter` is the internal
     /// sleep state that we saw at the time.
-    ThreadSleepy { worker: usize, sleepy_counter: u32 },
+    ThreadSleepy { worker: usize, sleepy_counter: u16 },
 
     /// Indicates that the thread's attempt to fall asleep was
     /// interrupted because the latch was set. (This is not, in and of
@@ -84,31 +84,13 @@ pub(super) enum Event {
     /// A job was removed from the global queue.
     JobUninjected { worker: usize },
 
-    /// A job was "announced", but no threads were sleepy.
-    ///
-    /// No effect on thread state, just a debugging event.
-    JobAnnounceEq {
-        worker: usize,
-        jobs_counter: u32,
-    },
-
-    /// A job was "announced", and threads were sleepy. We equalized
-    /// the counters.
-    ///
-    /// No effect on thread state, just a debugging event.
-    JobAnnounceBump {
-        worker: usize,
-        jobs_counter: u32,
-        sleepy_counter: u32,
-    },
-
     /// When announcing a job, this was the value of the counters we observed.
     ///
     /// No effect on thread state, just a debugging event.
     JobThreadCounts {
         worker: usize,
-        num_awake_but_idle: u32,
-        num_sleepers: u32,
+        num_idle: u16,
+        num_sleepers: u16,
     },
 
     /// Indicates that a job completed "ok" as part of a scope.
