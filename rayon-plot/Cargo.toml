@@ -1,0 +1,18 @@
+[package]
+name = "rayon-plot"
+version = "1.6.0"
+authors = ["Niko Matsakis <niko@alum.mit.edu>",
+           "Josh Stone <cuviper@gmail.com>"]
+description = "Internal Plotting utility for Rayon"
+license = "Apache-2.0/MIT"
+repository = "https://github.com/rayon-rs/rayon"
+documentation = "https://docs.rs/rayon/"
+readme = "README.md"
+publish = false
+edition = "2018" 
+
+[dependencies]
+anyhow = "1.0.18"
+csv = "1.1"
+structopt = "0.3"
+svg = "0.6.0"
