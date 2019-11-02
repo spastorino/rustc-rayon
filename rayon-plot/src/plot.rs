@@ -20,15 +20,25 @@ pub(crate) fn plot_stacked(args: &Args, data: &Data) -> anyhow::Result<()> {
     document.append(boxes);
 
     document.append(svg::node::element::Style::new(
-        r"
+        r#"
     .event_group {
         opacity: .75;
+    }
+    .tooltip_group {
+        opacity: 0;
     }
     .event_group:hover {
         fill: #ec008c;
         opacity: 1;
     }
-    ",
+    .event_group:hover + .tooltip_group {
+        opacity: 1;
+    }
+    .tooltip_group {
+        font-family: "Courier";
+        font-size: 10px;
+    }
+    "#,
     ));
 
     svg::save(&args.output_path, &document)
@@ -63,6 +73,8 @@ fn draw_boxes(_args: &Args, data: &Data) -> Group {
 
         let mut start = max_value;
 
+        let mut event_group = Group::new().set("class", "event_group");
+
         let mut next_rectangle = |unscaled_height: u32, color: &'static str| {
             let height = unscaled_height * PER_CPU_HEIGHT;
             start -= height;
@@ -77,14 +89,10 @@ fn draw_boxes(_args: &Args, data: &Data) -> Group {
 
         let event_threads =
             event.num_sleeping_threads + event.num_notified_threads + event.num_idle_threads;
-        group.append(
-            Group::new()
-                .set("class", "event_group")
-                .add(next_rectangle(event.num_sleeping_threads, "grey"))
-                .add(next_rectangle(event.num_notified_threads, "red"))
-                .add(next_rectangle(event.num_idle_threads, "yellow"))
-                .add(next_rectangle(num_threads - event_threads, "green")),
-        );
+        event_group.append(next_rectangle(event.num_sleeping_threads, "grey"));
+        event_group.append(next_rectangle(event.num_notified_threads, "red"));
+        event_group.append(next_rectangle(event.num_idle_threads, "yellow"));
+        event_group.append(next_rectangle(num_threads - event_threads, "green"));
 
         let circle = |unscaled_height: u32, color: &'static str| {
             let cy = max_value - unscaled_height * PER_CPU_HEIGHT;
@@ -95,8 +103,68 @@ fn draw_boxes(_args: &Args, data: &Data) -> Group {
                 .set("fill", color)
         };
 
-        group.append(circle(event.num_pending_jobs, "red"));
-        group.append(circle(event.injector_size, "black"));
+        event_group.append(circle(event.num_pending_jobs, "red"));
+        event_group.append(circle(event.injector_size, "black"));
+
+        let tooltip_text = format!(
+            "\
+active threads  : {active_threads}
+idle threads    : {idle_threads}
+sleeping threads: {sleeping_threads}
+notified threads: {notified_threads}
+pending jobs    : {pending_jobs}
+injected jobs   : {injector_size}
+event           : {event_description}
+",
+            active_threads = num_threads
+                - event.num_idle_threads
+                - event.num_sleeping_threads
+                - event.num_notified_threads,
+            idle_threads = event.num_idle_threads,
+            sleeping_threads = event.num_sleeping_threads,
+            notified_threads = event.num_notified_threads,
+            pending_jobs = event.num_pending_jobs,
+            injector_size = event.injector_size,
+            event_description = event.event_description,
+        );
+
+        let max_line_len = tooltip_text.lines().map(|s| s.len()).max().unwrap_or(0);
+        let num_lines = tooltip_text.lines().count();
+
+        let mut tooltip_group = node::element::Group::new()
+            .set("class", "tooltip_group")
+            .set(
+                "transform",
+                format!("translate({}, {})", x_start, max_value),
+            )
+            .add(
+                node::element::Rectangle::new()
+                    .set("x", 0)
+                    .set("y", 0)
+                    .set("width", format!("{}em", max_line_len * 2 / 3))
+                    .set("height", format!("{}ex", num_lines * 3 + 2))
+                    .set("fill", "yellow")
+                    .set("stroke", "black"),
+            );
+
+        let mut text_group = Group::new().set("transform", format!("translate(0, 2ex)"));
+        for (line, line_num) in tooltip_text.lines().zip(0..) {
+            text_group.append(
+                node::element::Text::new()
+                    .set("x", 0)
+                    .set("y", format!("{}ex", line_num * 3 + 2))
+                    .set("width", "22em")
+                    .set("height", "22em")
+                    .set("fill", "yellow")
+                    .set("stroke", "black")
+                    .add(node::Text::new(line.to_string())),
+            );
+        }
+        tooltip_group.append(text_group);
+
+        // it is important in the CSS that these are adjacent siblings!
+        group.append(event_group);
+        group.append(tooltip_group);
     }
 
     group
