@@ -18,6 +18,9 @@ struct Args {
 
     #[structopt(long="truncate", help="only consider the first N events")]
     truncate: Option<usize>,
+
+    #[structopt(long="sample", help="only consider every Nth event")]
+    sample: Option<usize>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -28,6 +31,15 @@ fn main() -> anyhow::Result<()> {
         Data::parse(file).with_context(|| format!("parsing `{}`", args.data_path.display()))?;
 
     println!("loaded {} events", data.events.len());
+
+    if let Some(n) = args.sample {
+        let sampled_events =
+            data.events.iter()
+            .zip(0..)
+            .filter_map(|(event, index)| if index % n == 0 { Some(event.clone()) } else { None })
+            .collect();
+        data.events = sampled_events;
+    }
 
     if let Some(n) = args.truncate {
         data.truncate(n);

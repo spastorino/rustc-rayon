@@ -14,7 +14,7 @@ pub(crate) struct Data {
     pub thread_states: Vec<ThreadState>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Event {
     pub time_stamp: u64,
     pub num_idle_threads: u32,
