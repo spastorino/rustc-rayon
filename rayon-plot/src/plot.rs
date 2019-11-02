@@ -47,7 +47,7 @@ pub(crate) fn plot_stacked(args: &Args, data: &Data) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn draw_boxes(_args: &Args, data: &Data) -> Group {
+fn draw_boxes(args: &Args, data: &Data) -> Group {
     let mut group = Group::new();
 
     // figure out how many threads we ever observe at one time
@@ -131,40 +131,47 @@ event           : {event_description}
         let max_line_len = tooltip_text.lines().map(|s| s.len()).max().unwrap_or(0);
         let num_lines = tooltip_text.lines().count();
 
-        let mut tooltip_group = node::element::Group::new()
-            .set("class", "tooltip_group")
-            .set(
-                "transform",
-                format!("translate({}, {})", x_start, max_value),
-            )
-            .add(
-                node::element::Rectangle::new()
-                    .set("x", 0)
-                    .set("y", 0)
-                    .set("width", format!("{}em", max_line_len * 2 / 3))
-                    .set("height", format!("{}ex", num_lines * 3 + 2))
-                    .set("fill", "yellow")
-                    .set("stroke", "black"),
-            );
+        let opt_tooltip_group = if args.elide_text {
+            None
+        } else {
+            let mut tooltip_group = node::element::Group::new()
+                .set("class", "tooltip_group")
+                .set(
+                    "transform",
+                    format!("translate({}, {})", x_start, max_value),
+                )
+                .add(
+                    node::element::Rectangle::new()
+                        .set("x", 0)
+                        .set("y", 0)
+                        .set("width", format!("{}em", max_line_len * 2 / 3))
+                        .set("height", format!("{}ex", num_lines * 3 + 2))
+                        .set("fill", "yellow")
+                        .set("stroke", "black"),
+                );
 
-        let mut text_group = Group::new().set("transform", format!("translate(0, 2ex)"));
-        for (line, line_num) in tooltip_text.lines().zip(0..) {
-            text_group.append(
-                node::element::Text::new()
-                    .set("x", 0)
-                    .set("y", format!("{}ex", line_num * 3 + 2))
-                    .set("width", "22em")
-                    .set("height", "22em")
-                    .set("fill", "yellow")
-                    .set("stroke", "black")
-                    .add(node::Text::new(line.to_string())),
-            );
-        }
-        tooltip_group.append(text_group);
+            let mut text_group = Group::new().set("transform", format!("translate(0, 2ex)"));
+            for (line, line_num) in tooltip_text.lines().zip(0..) {
+                text_group.append(
+                    node::element::Text::new()
+                        .set("x", 0)
+                        .set("y", format!("{}ex", line_num * 3 + 2))
+                        .set("width", "22em")
+                        .set("height", "22em")
+                        .set("fill", "yellow")
+                        .set("stroke", "black")
+                        .add(node::Text::new(line.to_string())),
+                );
+            }
+            tooltip_group.append(text_group);
+            Some(tooltip_group)
+        };
 
         // it is important in the CSS that these are adjacent siblings!
         group.append(event_group);
-        group.append(tooltip_group);
+        if let Some(tooltip_group) = opt_tooltip_group {
+            group.append(tooltip_group);
+        }
     }
 
     group

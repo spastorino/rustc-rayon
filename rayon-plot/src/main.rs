@@ -21,6 +21,9 @@ struct Args {
 
     #[structopt(long="sample", help="only consider every Nth event")]
     sample: Option<usize>,
+
+    #[structopt(long="elide-text", help="elide the text labels to save on file size")]
+    elide_text: bool,
 }
 
 fn main() -> anyhow::Result<()> {
