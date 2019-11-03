@@ -9,11 +9,12 @@ use std::io::Read;
 
 #[derive(Default, Debug)]
 pub(crate) struct Data {
+    pub num_threads: usize,
     pub events: Vec<Event>,
     pub thread_states: Vec<ThreadState>,
 }
 
-#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Event {
     pub line_number: usize,
     pub time_stamp: u64,
@@ -25,7 +26,7 @@ pub(crate) struct Event {
     pub event_description: String,
 
     // Range of indices in the thread-state vector
-    pub thread_states: (usize, usize),
+    pub thread_states: std::ops::Range<usize>,
 }
 
 #[derive(Debug)]
@@ -80,7 +81,7 @@ impl Data {
                                     format!("parsing `{}` on row {}", stringify!($field), index)
                                 })?,
                         )*
-                            thread_states: (0, 0),
+                            thread_states: 0..0,
                     }
                 }
             }
@@ -130,12 +131,12 @@ impl Data {
                 };
                 data.thread_states.push(ThreadState { code, queue_size });
             }
-            event.thread_states = (start_index, data.thread_states.len());
+            event.thread_states = start_index..data.thread_states.len();
+            let num_threads = event.thread_states.end - event.thread_states.start;
 
+            data.num_threads = data.num_threads.max(num_threads);
             data.events.push(event);
         }
-
-        data.events.sort();
 
         Ok(data)
     }
