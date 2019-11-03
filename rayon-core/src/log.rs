@@ -122,17 +122,11 @@ pub(super) enum Event {
     ScopeCompleteNoPanic { owner_thread: usize },
 }
 
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
-struct StampedEvent {
-    time_stamp: u64,
-    event: Event,
-}
-
 /// Handle to the logging thread, if any. You can use this to deliver
 /// logs. You can also clone it freely.
 #[derive(Clone)]
 pub(super) struct Logger {
-    sender: Option<Sender<StampedEvent>>,
+    sender: Option<Sender<Event>>,
 }
 
 impl Logger {
@@ -187,12 +181,8 @@ impl Logger {
         }
 
         if let Some(sender) = &self.sender {
-            let time_stamp = unsafe { x86::time::rdtscp() };
             sender
-                .send(StampedEvent {
-                    time_stamp,
-                    event: event(),
-                })
+                .send(event())
                 .unwrap();
         }
     }
@@ -201,7 +191,7 @@ impl Logger {
         num_workers: usize,
         log_filename: String,
         capacity: usize,
-        receiver: Receiver<StampedEvent>,
+        receiver: Receiver<Event>,
     ) {
         let file = File::create(&log_filename)
             .unwrap_or_else(|err| panic!("failed to open `{}`: {}", log_filename, err));
@@ -214,11 +204,11 @@ impl Logger {
         loop {
             loop {
                 match receiver.recv_timeout(timeout) {
-                    Ok(stamped_event) => {
-                        if let Event::Flush = stamped_event.event {
+                    Ok(event) => {
+                        if let Event::Flush = event {
                             break;
                         } else {
-                            events.push(stamped_event);
+                            events.push(event);
                         }
                     }
 
@@ -232,9 +222,9 @@ impl Logger {
 
             events.sort();
 
-            for stamped_event in events.drain(..) {
-                if state.simulate(&stamped_event.event) {
-                    state.dump(&mut writer, &stamped_event).unwrap();
+            for event in events.drain(..) {
+                if state.simulate(&event) {
+                    state.dump(&mut writer, &event).unwrap();
                 }
             }
 
@@ -246,13 +236,13 @@ impl Logger {
         num_workers: usize,
         log_filename: String,
         capacity: usize,
-        receiver: Receiver<StampedEvent>,
+        receiver: Receiver<Event>,
     ) {
         let file = File::create(&log_filename)
             .unwrap_or_else(|err| panic!("failed to open `{}`: {}", log_filename, err));
 
         let mut writer = BufWriter::new(file);
-        let mut events: VecDeque<StampedEvent> = VecDeque::with_capacity(capacity);
+        let mut events: VecDeque<Event> = VecDeque::with_capacity(capacity);
         let mut state = SimulatorState::new(num_workers);
         let timeout = std::time::Duration::from_secs(30);
         let mut skipped = false;
@@ -260,8 +250,8 @@ impl Logger {
         loop {
             loop {
                 match receiver.recv_timeout(timeout) {
-                    Ok(stamped_event) => {
-                        if let Event::Flush = stamped_event.event {
+                    Ok(event) => {
+                        if let Event::Flush = event {
                             // We ignore Flush events in tail mode --
                             // we're really just looking for
                             // deadlocks.
@@ -269,11 +259,11 @@ impl Logger {
                         } else {
                             if events.len() == capacity {
                                 let event = events.pop_front().unwrap();
-                                state.simulate(&event.event);
+                                state.simulate(&event);
                                 skipped = true;
                             }
 
-                            events.push_back(stamped_event);
+                            events.push_back(event);
                         }
                     }
 
@@ -286,11 +276,11 @@ impl Logger {
                 skipped = false;
             }
 
-            for stamped_event in events.drain(..) {
+            for event in events.drain(..) {
                 // In tail mode, we dump *all* events out, whether or
                 // not they were 'interesting' to the state machine.
-                state.simulate(&stamped_event.event);
-                state.dump(&mut writer, &stamped_event).unwrap();
+                state.simulate(&event);
+                state.dump(&mut writer, &event).unwrap();
             }
 
             writer.flush().unwrap();
@@ -299,15 +289,15 @@ impl Logger {
 
     fn all_logger_thread(
         num_workers: usize,
-        receiver: Receiver<StampedEvent>,
+        receiver: Receiver<Event>,
     ) {
         let stderr = std::io::stderr();
         let mut state = SimulatorState::new(num_workers);
 
-        for stamped_event in receiver {
+        for event in receiver {
             let mut writer = BufWriter::new(stderr.lock());
-            state.simulate(&stamped_event.event);
-            state.dump(&mut writer, &stamped_event).unwrap();
+            state.simulate(&event);
+            state.dump(&mut writer, &event).unwrap();
             writer.flush().unwrap();
         }
     }
@@ -419,7 +409,7 @@ impl SimulatorState {
         }
     }
 
-    fn dump(&mut self, w: &mut impl Write, event: &StampedEvent) -> io::Result<()> {
+    fn dump(&mut self, w: &mut impl Write, event: &Event) -> io::Result<()> {
         let num_idle_threads = self
             .thread_states
             .iter()
@@ -440,14 +430,13 @@ impl SimulatorState {
 
         let num_pending_jobs: usize = self.local_queue_size.iter().sum();
 
-        write!(w, "{:20},", event.time_stamp)?;
         write!(w, "{:2},", num_idle_threads)?;
         write!(w, "{:2},", num_sleeping_threads)?;
         write!(w, "{:2},", num_notified_threads)?;
         write!(w, "{:4},", num_pending_jobs)?;
         write!(w, "{:4},", self.injector_size)?;
 
-        let event_str = format!("{:?}", event.event);
+        let event_str = format!("{:?}", event);
         write!(w, r#""{:60}","#, event_str)?;
 
         for ((i, state), queue_size) in (0..).zip(&self.thread_states).zip(&self.local_queue_size) {
