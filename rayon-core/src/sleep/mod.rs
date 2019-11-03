@@ -310,8 +310,13 @@ impl Sleep {
         // If the queue is non-empty, then we always wake up a worker
         // -- clearly the existing idle jobs aren't enough. Otherwise,
         // check to see if we have enough idle workers.
-        let num_to_wake = std::cmp::min(num_jobs * 2, num_sleepers);
-        self.wake_any_threads(num_to_wake);
+        if !queue_was_empty {
+            let num_to_wake = std::cmp::min(num_jobs, num_sleepers);
+            self.wake_any_threads(num_to_wake);
+        } else if num_awake_but_idle < num_jobs {
+            let num_to_wake = std::cmp::min(num_jobs - num_awake_but_idle, num_sleepers);
+            self.wake_any_threads(num_to_wake);
+        }
     }
 
     /// Invoked when we find that the "jobs counter" is not equal to
@@ -341,13 +346,11 @@ impl Sleep {
         &self,
         mut num_to_wake: u32,
     ) {
-        if num_to_wake > 0 {
-            for i in 0..self.worker_sleep_states.len() {
-                if self.wake_specific_thread(i) {
-                    num_to_wake -= 1;
-                    if num_to_wake == 0 {
-                        return;
-                    }
+        for i in 0..self.worker_sleep_states.len() {
+            if self.wake_specific_thread(i) {
+                num_to_wake -= 1;
+                if num_to_wake == 0 {
+                    return;
                 }
             }
         }
