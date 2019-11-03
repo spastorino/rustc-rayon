@@ -74,17 +74,21 @@ impl AtomicCounters {
         self.try_exchange(old_value, new_value, Ordering::SeqCst)
     }
 
-    /// Subtracts an idle thread. This cannot fail; it returns true if
-    /// this was the *last* idle thread and a thread was sleeping.
+    /// Subtracts an idle thread. This cannot fail; it returns the
+    /// number of sleeping threads to wake up (if any).
     #[inline]
-    pub(super) fn sub_idle_thread(&self) -> bool {
+    pub(super) fn sub_idle_thread(&self) -> u16 {
         let old_value = Counters::new(self.value.fetch_sub(ONE_IDLE, Ordering::SeqCst));
         debug_assert!(
             old_value.raw_idle_threads() > 0,
             "sub_idle_thread: old_value {:?} has no idle threads",
             old_value,
         );
-        old_value.raw_idle_threads() == 1 && old_value.sleeping_threads() == 0
+
+        // Current heuristic: whenever an idle thread goes away, if
+        // there are any sleeping threads, wake 'em up.
+        let sleeping_threads = old_value.sleeping_threads();
+        std::cmp::min(sleeping_threads, 2)
     }
 
     /// Subtracts a sleeping thread. This cannot fail, but it is only

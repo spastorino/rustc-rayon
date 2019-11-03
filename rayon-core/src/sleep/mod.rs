@@ -85,11 +85,10 @@ impl Sleep {
             yields: idle_state.rounds,
         });
 
-        if self.counters.sub_idle_thread() {
-            // If we were the last idle thread and other threads are still sleeping,
-            // then we should wake up another thread.
-            self.wake_any_threads(1);
-        }
+        // If we were the last idle thread and other threads are still sleeping,
+        // then we should wake up another thread.
+        let threads_to_wake = self.counters.sub_idle_thread();
+        self.wake_any_threads(threads_to_wake as u32);
     }
 
     #[inline]
