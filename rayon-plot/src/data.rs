@@ -17,7 +17,6 @@ pub(crate) struct Data {
 #[derive(Clone, Debug)]
 pub(crate) struct Event {
     pub line_number: usize,
-    pub time_stamp: u64,
     pub num_idle_threads: u32,
     pub num_sleeping_threads: u32,
     pub num_notified_threads: u32,
@@ -86,7 +85,6 @@ impl Data {
                 }
             }
             let mut event = get_event_fields! {
-                time_stamp,
                 num_idle_threads,
                 num_sleeping_threads,
                 num_notified_threads,
