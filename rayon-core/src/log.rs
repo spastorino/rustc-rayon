@@ -220,8 +220,6 @@ impl Logger {
                 }
             }
 
-            events.sort();
-
             for event in events.drain(..) {
                 if state.simulate(&event) {
                     state.dump(&mut writer, &event).unwrap();
