@@ -14,7 +14,7 @@ categories = ["concurrency"]
 exclude = ["/ci/*", "/scripts/*", "/.travis.yml", "/appveyor.yml", "/bors.toml"]
 
 [workspace]
-members = ["rayon-demo", "rayon-core", "rayon-futures", "rayon-plot"]
+members = ["rayon-demo", "rayon-core", "rayon-futures"]
 exclude = ["ci"]
 
 [dependencies]
