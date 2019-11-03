@@ -4,6 +4,7 @@ use structopt::StructOpt;
 
 mod data;
 use data::Data;
+mod stats;
 
 mod plot;
 
@@ -34,6 +35,8 @@ fn main() -> anyhow::Result<()> {
         Data::parse(file).with_context(|| format!("parsing `{}`", args.data_path.display()))?;
 
     println!("loaded {} events", data.events.len());
+
+    stats::stats(&args, &data)?;
 
     if let Some(n) = args.sample {
         let sampled_events =

@@ -6,7 +6,6 @@
 use anyhow::anyhow;
 use anyhow::Context;
 use std::io::Read;
-use std::ops::Range;
 
 #[derive(Default, Debug)]
 pub(crate) struct Data {
@@ -14,8 +13,9 @@ pub(crate) struct Data {
     pub thread_states: Vec<ThreadState>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq)]
 pub(crate) struct Event {
+    pub line_number: usize,
     pub time_stamp: u64,
     pub num_idle_threads: u32,
     pub num_sleeping_threads: u32,
@@ -25,7 +25,7 @@ pub(crate) struct Event {
     pub event_description: String,
 
     // Range of indices in the thread-state vector
-    pub thread_states: Range<usize>,
+    pub thread_states: (usize, usize),
 }
 
 #[derive(Debug)]
@@ -70,6 +70,7 @@ impl Data {
             macro_rules! get_event_fields {
                 ($($field:ident,)*) => {
                     Event {
+                        line_number: index,
                         $(
                             $field: fields.next()
                                 .ok_or_else(|| anyhow!("no `{}`", stringify!($field)))?
@@ -79,7 +80,7 @@ impl Data {
                                     format!("parsing `{}` on row {}", stringify!($field), index)
                                 })?,
                         )*
-                            thread_states: (0..0),
+                            thread_states: (0, 0),
                     }
                 }
             }
@@ -129,15 +130,25 @@ impl Data {
                 };
                 data.thread_states.push(ThreadState { code, queue_size });
             }
-            event.thread_states = start_index..data.thread_states.len();
+            event.thread_states = (start_index, data.thread_states.len());
 
             data.events.push(event);
         }
+
+        data.events.sort();
 
         Ok(data)
     }
 
     pub(crate) fn truncate(&mut self, n: usize) {
         self.events.truncate(n);
+    }
+}
+
+impl Event {
+    pub(crate) fn is_overworked(&self) -> bool {
+        let too_many_jobs = self.num_pending_jobs > self.num_idle_threads;
+        let threads_asleep = self.num_sleeping_threads != 0 || self.num_notified_threads != 0;
+        too_many_jobs && threads_asleep
     }
 }

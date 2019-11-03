@@ -73,7 +73,7 @@ fn draw_boxes(args: &Args, data: &Data) -> Group {
 
         let mut start = max_value;
 
-        let mut event_group = Group::new().set("class", "event_group");
+        let mut event_group = Group::new().set("class", "event_group foo");
 
         let mut next_rectangle = |unscaled_height: u32, color: &'static str| {
             let height = unscaled_height * PER_CPU_HEIGHT;
@@ -94,6 +94,18 @@ fn draw_boxes(args: &Args, data: &Data) -> Group {
         event_group.append(next_rectangle(event.num_idle_threads, "yellow"));
         event_group.append(next_rectangle(num_threads - event_threads, "green"));
 
+        if event.is_overworked() {
+            event_group.append(
+                node::element::Rectangle::new()
+                    .set("x", x_start)
+                    .set("y", max_value)
+                    .set("width", PER_EVENT_WIDTH)
+                    .set("height", PER_CPU_HEIGHT)
+                    .set("fill", "red")
+                    .set("stroke", "black"),
+            );
+        }
+
         let circle = |unscaled_height: u32, color: &'static str| {
             let cy = max_value - unscaled_height * PER_CPU_HEIGHT;
             node::element::Circle::new()
@@ -108,6 +120,7 @@ fn draw_boxes(args: &Args, data: &Data) -> Group {
 
         let tooltip_text = format!(
             "\
+line number     : {line_number}
 active threads  : {active_threads}
 idle threads    : {idle_threads}
 sleeping threads: {sleeping_threads}
@@ -116,6 +129,7 @@ pending jobs    : {pending_jobs}
 injected jobs   : {injector_size}
 event           : {event_description}
 ",
+            line_number = event.line_number,
             active_threads = num_threads
                 - event.num_idle_threads
                 - event.num_sleeping_threads
@@ -138,7 +152,7 @@ event           : {event_description}
                 .set("class", "tooltip_group")
                 .set(
                     "transform",
-                    format!("translate({}, {})", x_start, max_value),
+                    format!("translate({}, {})", x_start, max_value + PER_CPU_HEIGHT),
                 )
                 .add(
                     node::element::Rectangle::new()
