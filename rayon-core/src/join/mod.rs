@@ -1,6 +1,5 @@
 use job::StackJob;
 use latch::SpinLatch;
-use log::Event::*;
 use registry::{self, WorkerThread};
 use std::any::Any;
 use unwind;
@@ -156,15 +155,9 @@ where
                     // Found it! Let's run it.
                     //
                     // Note that this could panic, but it's ok if we unwind here.
-                    worker_thread.log(|| JobPoppedRhs {
-                        worker: worker_thread.index()
-                    });
                     let result_b = job_b.run_inline(injected);
                     return (result_a, result_b);
                 } else {
-                    worker_thread.log(|| JobPopped {
-                        worker: worker_thread.index()
-                    });
                     worker_thread.execute(job);
                 }
             } else {
