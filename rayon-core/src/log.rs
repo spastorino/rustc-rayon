@@ -45,9 +45,6 @@ pub(super) enum Event {
     /// machine.
     ThreadSawLatchSet { worker: usize, latch_addr: usize },
 
-    /// Indicates that an idle worker thread searched for another round without finding work.
-    ThreadNoWork { worker: usize, yields: u32 },
-
     /// Indicates that an idle worker is getting sleepy. `sleepy_counter` is the internal
     /// sleep state that we saw at the time.
     ThreadSleepy { worker: usize, sleepy_counter: u16 },

@@ -97,10 +97,6 @@ impl Sleep {
         idle_state: &mut IdleState,
         latch: &CoreLatch,
     ) {
-        self.logger.log(|| ThreadNoWork {
-            worker: idle_state.worker_index,
-            yields: idle_state.rounds,
-        });
         if idle_state.rounds < ROUNDS_UNTIL_SLEEPY {
             thread::yield_now();
             idle_state.rounds += 1;
