@@ -341,11 +341,13 @@ impl Sleep {
         &self,
         mut num_to_wake: u32,
     ) {
-        for i in 0..self.worker_sleep_states.len() {
-            if self.wake_specific_thread(i) {
-                num_to_wake -= 1;
-                if num_to_wake == 0 {
-                    return;
+        if num_to_wake > 0 {
+            for i in 0..self.worker_sleep_states.len() {
+                if self.wake_specific_thread(i) {
+                    num_to_wake -= 1;
+                    if num_to_wake == 0 {
+                        return;
+                    }
                 }
             }
         }
